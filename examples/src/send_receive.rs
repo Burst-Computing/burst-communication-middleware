@@ -72,13 +72,13 @@ async fn main() -> Result<()> {
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(async {
+            let r = rt.block_on(async {
                 middleware
                     .init_local(i)
                     .await
                     .expect("Failed to init middleware");
 
-                worker(
+                let r = worker(
                     middleware,
                     i,
                     args.start_global,
@@ -86,8 +86,12 @@ async fn main() -> Result<()> {
                     args.start_local,
                     args.end_local,
                 )
-                .await
-            })
+                .await;
+                info!("runtime end: id={}", i);
+                r
+            });
+            info!("thread end: id={}", i);
+            r
         }));
     }
 
@@ -95,6 +99,7 @@ async fn main() -> Result<()> {
         if let Err(e) = handle.join().unwrap() {
             error!("{:?}", e);
         }
+        info!("join end");
     }
 
     Ok(())
@@ -128,6 +133,8 @@ async fn worker(
         info!("worker: id={}, recv from id={}", id, msg.sender_id);
         assert_eq!(msg.data, vec![1, 2, 3]);
     }
+
+    info!("worker end: id={}", id);
 
     Ok(())
 }
