@@ -1,0 +1,83 @@
+[
+    {
+        "bucket": "sample-data",
+        "key": "terasort-5m",
+        "sort_column": 0,
+        "delimiter": ",",
+        "partitions": 10,
+        "partition_idx": 0,
+        "bound": ")MA^xkuv0\\"
+    },
+    {
+        "bucket": "sample-data",
+        "key": "terasort-5m",
+        "sort_column": 0,
+        "delimiter": ",",
+        "partitions": 10,
+        "partition_idx": 1,
+        "bound": "2oP@ifqBd+"
+    },
+    {
+        "bucket": "sample-data",
+        "key": "terasort-5m",
+        "sort_column": 0,
+        "delimiter": ",",
+        "partitions": 10,
+        "partition_idx": 2,
+        "bound": ":BDL<\\ZAsO"
+    },
+    {
+        "bucket": "sample-data",
+        "key": "terasort-5m",
+        "sort_column": 0,
+        "delimiter": ",",
+        "partitions": 10,
+        "partition_idx": 3,
+        "bound": "C]s+S3iv'b"
+    },
+    {
+        "bucket": "sample-data",
+        "key": "terasort-5m",
+        "sort_column": 0,
+        "delimiter": ",",
+        "partitions": 10,
+        "partition_idx": 4,
+        "bound": "MmXuuR$&>@"
+    },
+    {
+        "bucket": "sample-data",
+        "key": "terasort-5m",
+        "sort_column": 0,
+        "delimiter": ",",
+        "partitions": 10,
+        "partition_idx": 5,
+        "bound": "W_#$6z7/F1"
+    },
+    {
+        "bucket": "sample-data",
+        "key": "terasort-5m",
+        "sort_column": 0,
+        "delimiter": ",",
+        "partitions": 10,
+        "partition_idx": 6,
+        "bound": "a1T@>!.wd@"
+    },
+    {
+        "bucket": "sample-data",
+        "key": "terasort-5m",
+        "sort_column": 0,
+        "delimiter": ",",
+        "partitions": 10,
+        "partition_idx": 7,
+        "bound": "i`Aq]4Zg=Q"
+    },
+    {
+        "bucket": "sample-data",
+        "key": "terasort-5m",
+        "sort_column": 0,
+        "delimiter": ",",
+        "partitions": 10,
+        "partition_idx": 8,
+        "bound": "t(z4Uvc25#"
+    }
+]
