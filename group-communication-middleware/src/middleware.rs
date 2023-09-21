@@ -11,8 +11,8 @@ use futures::{FutureExt, StreamExt};
 use lapin::{
     message::Delivery,
     options::{
-        BasicAckOptions, BasicPublishOptions, ExchangeDeclareOptions, QueueBindOptions,
-        QueueDeclareOptions,
+        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions,
+        QueueBindOptions, QueueDeclareOptions,
     },
     types::{AMQPValue, FieldTable},
     BasicProperties, Channel, Connection, ConnectionProperties, Consumer, ExchangeKind,
@@ -96,6 +96,9 @@ impl Middleware {
         let mut local_queues = HashMap::new();
 
         let queues = futures::future::try_join_all(args.global_range.clone().map(|id| {
+            if args.local_range.contains(&id) {
+                local_queues.insert(id, format!("{}_{}", args.queue_prefix, id));
+            }
             channel.queue_declare(
                 format!("{}_{}", args.queue_prefix, id).leak(),
                 options,
@@ -117,11 +120,6 @@ impl Middleware {
         .await?;
 
         channel.close(200, "Bye").await?;
-
-        // add local queues to local_queues
-        for (id, queue) in args.local_range.clone().zip(queues) {
-            local_queues.insert(id, queue.name().to_string());
-        }
 
         // create local channels
         let mut local_channel_tx = HashMap::new();
@@ -159,7 +157,7 @@ impl Middleware {
                         self.options.queue_prefix,
                         self.id.unwrap()
                     ),
-                    lapin::options::BasicConsumeOptions::default(),
+                    BasicConsumeOptions::default(),
                     FieldTable::default(),
                 )
                 .await?,
