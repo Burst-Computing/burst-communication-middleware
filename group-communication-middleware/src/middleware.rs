@@ -9,8 +9,12 @@ use futures::{FutureExt, StreamExt};
 use lapin::{
     message::Delivery,
     options::{
-        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions,
-        QueueBindOptions, QueueDeclareOptions,
+        //BasicAckOptions,
+        BasicConsumeOptions,
+        BasicPublishOptions,
+        ExchangeDeclareOptions,
+        QueueBindOptions,
+        QueueDeclareOptions,
     },
     types::{AMQPValue, FieldTable},
     BasicProperties, Channel, Connection, ConnectionProperties, Consumer, ExchangeKind,
@@ -153,6 +157,8 @@ impl Middleware {
     pub async fn init_local(&mut self, id: u32) -> Result<()> {
         self.rabbitmq_channel = Some(self.rabbitmq_conn.create_channel().await?);
         self.id = Some(id);
+        let mut options = BasicConsumeOptions::default();
+        options.no_ack = true;
         self.consumer = Some(
             self.rabbitmq_channel
                 .as_ref()
@@ -164,7 +170,7 @@ impl Middleware {
                         self.options.queue_prefix,
                         self.id.unwrap()
                     ),
-                    BasicConsumeOptions::default(),
+                    options,
                     FieldTable::default(),
                 )
                 .await?,
@@ -238,7 +244,7 @@ impl Middleware {
             .flatten()
         {
             let delivery = delivery?;
-            delivery.ack(BasicAckOptions::default()).await?;
+            //delivery.ack(BasicAckOptions::default()).await?;
             return Ok(Some(Self::get_message(delivery)));
         }
 
@@ -270,7 +276,7 @@ impl Middleware {
         let fut = async {
             // receive blocking
             let delivery = self.consumer.clone().unwrap().next().await.unwrap()?;
-            delivery.ack(BasicAckOptions::default()).await?;
+            //delivery.ack(BasicAckOptions::default()).await?;
             Ok::<Message, Error>(Self::get_message(delivery))
         };
 
