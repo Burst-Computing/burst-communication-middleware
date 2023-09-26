@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use tokio::sync::{
-    mpsc::{self, Receiver, Sender},
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
     Mutex,
 };
 
@@ -71,8 +71,8 @@ pub struct Middleware {
 
     local_queues: HashMap<u32, String>,
 
-    local_channel_tx: HashMap<u32, Sender<Message>>,
-    local_channel_rx: HashMap<u32, Arc<Mutex<Receiver<Message>>>>,
+    local_channel_tx: HashMap<u32, UnboundedSender<Message>>,
+    local_channel_rx: HashMap<u32, Arc<Mutex<UnboundedReceiver<Message>>>>,
 
     consumer: Option<Consumer>,
 
@@ -137,7 +137,7 @@ impl Middleware {
         let mut local_channel_rx = HashMap::new();
 
         for id in args.local_range.clone() {
-            let (tx, rx) = mpsc::channel::<Message>(args.buffer_size);
+            let (tx, rx) = mpsc::unbounded_channel::<Message>();
             local_channel_tx.insert(id, tx);
             local_channel_rx.insert(id, Arc::new(Mutex::new(rx)));
         }
@@ -196,8 +196,7 @@ impl Middleware {
                     data,
                     chunk_id,
                     last_chunk,
-                })
-                .await?;
+                })?;
             } else {
                 return Err("worker with id {} has no channel registered".into());
             }
