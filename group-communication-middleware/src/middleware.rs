@@ -1,10 +1,8 @@
-use std::{
-    collections::HashMap,
-    ops::Range,
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        Arc, Mutex,
-    },
+use std::{collections::HashMap, ops::Range, sync::Arc};
+
+use tokio::sync::{
+    mpsc::{self, Receiver, Sender},
+    Mutex,
 };
 
 use futures::{FutureExt, StreamExt};
@@ -24,6 +22,8 @@ use crate::types::Message;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
 
+const DEFAULT_BUFFER_SIZE: usize = 1024;
+
 #[derive(Debug, Clone)]
 pub struct MiddlewareArguments {
     rabbitmq_uri: String,
@@ -31,6 +31,7 @@ pub struct MiddlewareArguments {
     queue_prefix: String,
     global_range: Range<u32>,
     local_range: Range<u32>,
+    buffer_size: usize,
 }
 
 impl MiddlewareArguments {
@@ -41,14 +42,20 @@ impl MiddlewareArguments {
             queue_prefix: "queue".to_string(),
             global_range,
             local_range,
+            buffer_size: DEFAULT_BUFFER_SIZE,
         }
     }
 
     impl_chainable_setter! {
         exchange_name, String
     }
+
     impl_chainable_setter! {
         queue_prefix, String
+    }
+
+    impl_chainable_setter! {
+        buffer_size, usize
     }
 }
 
@@ -126,7 +133,7 @@ impl Middleware {
         let mut local_channel_rx = HashMap::new();
 
         for id in args.local_range.clone() {
-            let (tx, rx) = mpsc::channel::<Message>();
+            let (tx, rx) = mpsc::channel::<Message>(args.buffer_size);
             local_channel_tx.insert(id, tx);
             local_channel_rx.insert(id, Arc::new(Mutex::new(rx)));
         }
@@ -183,7 +190,8 @@ impl Middleware {
                     data,
                     chunk_id,
                     last_chunk,
-                })?
+                })
+                .await?;
             } else {
                 return Err("worker with id {} has no channel registered".into());
             }
@@ -215,7 +223,7 @@ impl Middleware {
 
         if let Some(rx) = self.local_channel_rx.get(&self.id.unwrap()) {
             // try receive without blocking
-            if let Ok(msg) = rx.lock().unwrap().try_recv() {
+            if let Ok(msg) = rx.lock().await.try_recv() {
                 return Ok(Some(msg));
             }
         }
@@ -253,7 +261,10 @@ impl Middleware {
             .clone();
 
         // receive blocking
-        let handle = tokio::task::spawn_blocking(move || rx.lock().unwrap().recv());
+        let handle = async {
+            let msg = rx.lock().await.recv().await.unwrap();
+            Ok::<Message, Error>(msg)
+        };
 
         // Receive from rabbitmq
         let fut = async {
@@ -265,7 +276,7 @@ impl Middleware {
 
         tokio::select! {
             msg = fut => Ok(msg?),
-            msg = handle => Ok(msg??),
+            msg = handle => Ok(msg?),
         }
     }
 

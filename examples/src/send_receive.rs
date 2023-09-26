@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
         Ok(m) => m,
         Err(e) => {
             error!("{:?}", e);
-            return Ok(());
+            return Err(e);
         }
     };
 
