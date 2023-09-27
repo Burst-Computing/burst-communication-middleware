@@ -14,7 +14,7 @@ use tracing_subscriber::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-const DURATION: u64 = 10;
+const DURATION: u64 = 2;
 const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB
 const NUM_EXECUTIONS: usize = 3;
 
@@ -176,10 +176,15 @@ async fn worker(
     *start_time = start.clone();
     drop(start_time); // Release the lock early
 
-    let send = async {
+    let global_rng = global_range.clone();
+    let mddwr = middleware.clone();
+    let send = tokio::spawn(async move {
         while elapsed_time < Duration::from_secs(duration) {
-            for receiver_id in global_range.clone() {
-                if let Err(e) = middleware.send(receiver_id, data.clone()).await {
+            for receiver_id in global_rng.clone() {
+                if receiver_id == id {
+                    continue;
+                }
+                if let Err(e) = mddwr.send(receiver_id, data.clone()).await {
                     error!("Error: {}", e);
                 }
             }
@@ -187,22 +192,27 @@ async fn worker(
         }
 
         // Signal the end of data transfer to all receivers
-        for receiver_id in global_range.clone() {
-            if let Err(e) = middleware.send(receiver_id, vec![]).await {
+        for receiver_id in global_rng.clone() {
+            if receiver_id == id {
+                continue;
+            }
+            if let Err(e) = mddwr.send(receiver_id, vec![]).await {
                 error!("Error: {}", e);
             }
         }
-    };
+    });
 
-    let receive = async {
+    let global_rng = global_range.clone();
+    let mddwr = middleware.clone();
+    let receive = tokio::spawn(async move {
         let mut received_bytes = 0;
 
         let mut num_empty = 0;
 
-        while let Ok(msg) = middleware.recv().await {
+        while let Ok(msg) = mddwr.recv().await {
             if msg.data.is_empty() {
                 num_empty += 1;
-                if num_empty == global_range.len() {
+                if num_empty == global_rng.len() - 1 {
                     break;
                 }
             }
@@ -215,9 +225,9 @@ async fn worker(
 
         let mut end_time = end_time.lock().unwrap();
         *end_time = Instant::now();
-    };
+    });
 
-    tokio::join!(send, receive);
+    let _ = tokio::join!(send, receive);
 
     info!("worker end: id={}", id);
 
