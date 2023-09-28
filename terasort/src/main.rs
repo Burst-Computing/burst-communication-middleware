@@ -1,10 +1,9 @@
 use std::fs::File;
 
-use lib::BurstMiddleware;
+use group_communication_middleware::{Middleware, MiddlewareArguments};
 use serde_derive::{Deserialize, Serialize};
 use serde_json::{Error, Value};
 
-mod lib;
 mod sort;
 
 extern crate serde_json;
@@ -37,7 +36,7 @@ fn main() {
     // let mut threads = Vec::new();
 
     let input = inputs[0].clone();
-    let bm: BurstMiddleware = BurstMiddleware {
+    let bm: Middleware = Middleware {
         burst_size: burst_size,
         worker_id: 0,
     };
