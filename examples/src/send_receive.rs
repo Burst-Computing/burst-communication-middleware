@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bytes::Bytes;
 use clap::Parser;
 use group_communication_middleware::{Middleware, MiddlewareArguments};
 use tracing::{error, info};
@@ -148,7 +149,7 @@ async fn main() -> Result<()> {
     let stdev =
         (results.iter().map(|x| (x - avg) * (x - avg)).sum::<f64>() / results.len() as f64).sqrt();
 
-    info!("Average,stdev: {},{}", avg, stdev);
+    info!("Average,stdev: {:.3},{:.3}", avg, stdev);
 
     Ok(())
 }
@@ -168,7 +169,7 @@ async fn worker(
         id, global_range, local_range
     );
 
-    let data = vec![b'x'; CHUNK_SIZE];
+    let data = Bytes::from(vec![b'x'; CHUNK_SIZE]);
 
     let mut elapsed_time = Duration::new(0, 0);
     let start = Instant::now();
@@ -196,7 +197,7 @@ async fn worker(
             if receiver_id == id {
                 continue;
             }
-            if let Err(e) = mddwr.send(receiver_id, vec![]).await {
+            if let Err(e) = mddwr.send(receiver_id, Bytes::new()).await {
                 error!("Error: {}", e);
             }
         }

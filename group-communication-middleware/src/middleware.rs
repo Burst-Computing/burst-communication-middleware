@@ -1,5 +1,6 @@
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
+use bytes::Bytes;
 use tokio::sync::{
     mpsc::{self, UnboundedReceiver, UnboundedSender},
     Mutex,
@@ -26,8 +27,6 @@ use crate::types::Message;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
 
-const DEFAULT_BUFFER_SIZE: usize = 1024;
-
 #[derive(Debug, Clone)]
 pub struct MiddlewareArguments {
     rabbitmq_uri: String,
@@ -35,7 +34,6 @@ pub struct MiddlewareArguments {
     queue_prefix: String,
     global_range: Range<u32>,
     local_range: Range<u32>,
-    buffer_size: usize,
 }
 
 impl MiddlewareArguments {
@@ -46,7 +44,6 @@ impl MiddlewareArguments {
             queue_prefix: "queue".to_string(),
             global_range,
             local_range,
-            buffer_size: DEFAULT_BUFFER_SIZE,
         }
     }
 
@@ -56,10 +53,6 @@ impl MiddlewareArguments {
 
     impl_chainable_setter! {
         queue_prefix, String
-    }
-
-    impl_chainable_setter! {
-        buffer_size, usize
     }
 }
 
@@ -178,7 +171,7 @@ impl Middleware {
         Ok(())
     }
 
-    pub async fn send(&self, dest: u32, data: Vec<u8>) -> Result<()> {
+    pub async fn send(&self, dest: u32, data: Bytes) -> Result<()> {
         let chunk_id = 0;
         let last_chunk = true;
 
@@ -259,11 +252,7 @@ impl Middleware {
             return Err("init_local() must be called before receive()".into());
         }
 
-        let rx = self
-            .local_channel_rx
-            .get(&self.id.unwrap())
-            .unwrap()
-            .clone();
+        let rx = self.local_channel_rx.get(&self.id.unwrap()).unwrap();
 
         // receive blocking
         let handle = async {
@@ -286,7 +275,7 @@ impl Middleware {
     }
 
     fn get_message(delivery: Delivery) -> Message {
-        let data = delivery.data;
+        let data = Bytes::from(delivery.data);
         let sender_id = delivery
             .properties
             .headers()
