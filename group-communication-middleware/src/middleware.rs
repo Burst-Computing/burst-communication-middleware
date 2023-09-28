@@ -1,18 +1,21 @@
-use std::{
-    collections::HashMap,
-    ops::Range,
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        Arc, Mutex,
-    },
+use std::{collections::HashMap, ops::Range, sync::Arc};
+
+use bytes::Bytes;
+use tokio::sync::{
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+    Mutex,
 };
 
 use futures::{FutureExt, StreamExt};
 use lapin::{
     message::Delivery,
     options::{
-        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions,
-        QueueBindOptions, QueueDeclareOptions,
+        //BasicAckOptions,
+        BasicConsumeOptions,
+        BasicPublishOptions,
+        ExchangeDeclareOptions,
+        QueueBindOptions,
+        QueueDeclareOptions,
     },
     types::{AMQPValue, FieldTable},
     BasicProperties, Channel, Connection, ConnectionProperties, Consumer, ExchangeKind,
@@ -47,6 +50,7 @@ impl MiddlewareArguments {
     impl_chainable_setter! {
         exchange_name, String
     }
+
     impl_chainable_setter! {
         queue_prefix, String
     }
@@ -60,8 +64,8 @@ pub struct Middleware {
 
     local_queues: HashMap<u32, String>,
 
-    local_channel_tx: HashMap<u32, Sender<Message>>,
-    local_channel_rx: HashMap<u32, Arc<Mutex<Receiver<Message>>>>,
+    local_channel_tx: HashMap<u32, UnboundedSender<Message>>,
+    local_channel_rx: HashMap<u32, Arc<Mutex<UnboundedReceiver<Message>>>>,
 
     consumer: Option<Consumer>,
 
@@ -126,7 +130,7 @@ impl Middleware {
         let mut local_channel_rx = HashMap::new();
 
         for id in args.local_range.clone() {
-            let (tx, rx) = mpsc::channel::<Message>();
+            let (tx, rx) = mpsc::unbounded_channel::<Message>();
             local_channel_tx.insert(id, tx);
             local_channel_rx.insert(id, Arc::new(Mutex::new(rx)));
         }
@@ -146,6 +150,8 @@ impl Middleware {
     pub async fn init_local(&mut self, id: u32) -> Result<()> {
         self.rabbitmq_channel = Some(self.rabbitmq_conn.create_channel().await?);
         self.id = Some(id);
+        let mut options = BasicConsumeOptions::default();
+        options.no_ack = true;
         self.consumer = Some(
             self.rabbitmq_channel
                 .as_ref()
@@ -157,7 +163,7 @@ impl Middleware {
                         self.options.queue_prefix,
                         self.id.unwrap()
                     ),
-                    BasicConsumeOptions::default(),
+                    options,
                     FieldTable::default(),
                 )
                 .await?,
@@ -165,7 +171,7 @@ impl Middleware {
         Ok(())
     }
 
-    pub async fn send(&self, dest: u32, data: Vec<u8>) -> Result<()> {
+    pub async fn send(&self, dest: u32, data: Bytes) -> Result<()> {
         let chunk_id = 0;
         let last_chunk = true;
 
@@ -183,7 +189,7 @@ impl Middleware {
                     data,
                     chunk_id,
                     last_chunk,
-                })?
+                })?;
             } else {
                 return Err("worker with id {} has no channel registered".into());
             }
@@ -215,7 +221,7 @@ impl Middleware {
 
         if let Some(rx) = self.local_channel_rx.get(&self.id.unwrap()) {
             // try receive without blocking
-            if let Ok(msg) = rx.lock().unwrap().try_recv() {
+            if let Ok(msg) = rx.lock().await.try_recv() {
                 return Ok(Some(msg));
             }
         }
@@ -230,7 +236,7 @@ impl Middleware {
             .flatten()
         {
             let delivery = delivery?;
-            delivery.ack(BasicAckOptions::default()).await?;
+            //delivery.ack(BasicAckOptions::default()).await?;
             return Ok(Some(Self::get_message(delivery)));
         }
 
@@ -246,31 +252,30 @@ impl Middleware {
             return Err("init_local() must be called before receive()".into());
         }
 
-        let rx = self
-            .local_channel_rx
-            .get(&self.id.unwrap())
-            .unwrap()
-            .clone();
+        let rx = self.local_channel_rx.get(&self.id.unwrap()).unwrap();
 
         // receive blocking
-        let handle = tokio::task::spawn_blocking(move || rx.lock().unwrap().recv());
+        let handle = async {
+            let msg = rx.lock().await.recv().await.unwrap();
+            Ok::<Message, Error>(msg)
+        };
 
         // Receive from rabbitmq
         let fut = async {
             // receive blocking
             let delivery = self.consumer.clone().unwrap().next().await.unwrap()?;
-            delivery.ack(BasicAckOptions::default()).await?;
+            //delivery.ack(BasicAckOptions::default()).await?;
             Ok::<Message, Error>(Self::get_message(delivery))
         };
 
         tokio::select! {
             msg = fut => Ok(msg?),
-            msg = handle => Ok(msg??),
+            msg = handle => Ok(msg?),
         }
     }
 
     fn get_message(delivery: Delivery) -> Message {
-        let data = delivery.data;
+        let data = Bytes::from(delivery.data);
         let sender_id = delivery
             .properties
             .headers()
