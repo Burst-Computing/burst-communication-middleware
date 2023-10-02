@@ -132,22 +132,23 @@ def main():
 
     pprint(segment_bounds)
 
-    # Write pyload input as JSON file
-    payload = [
+    # Write parameters as JSON file
+    params = [
         {
             "bucket": args.bucket,
             "key": args.key,
+            "obj_size": obj_size,
             "sort_column": args.sort_column,
             "delimiter": args.delimiter,
             "partitions": args.partitions,
             "partition_idx": i,
-            "bound": sb,
+            "segment_bounds": segment_bounds,
         }
-        for i, sb in enumerate(segment_bounds)
+        for i in range(args.partitions)
     ]
 
     with open(f"{args.payload_filename}.json", "w") as f:
-        json.dump(payload, f, indent=4)
+        json.dump(params, f, indent=4)
 
 
 if __name__ == "__main__":
