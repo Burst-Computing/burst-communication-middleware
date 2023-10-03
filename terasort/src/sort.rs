@@ -11,47 +11,45 @@ use tokio::io::AsyncReadExt;
 
 const PADDING: u32 = 512;
 
-fn trim_chunk(buff: &mut Vec<u8>, range: (u32, u32)) {
-    let offset_0: usize = 0;
-
-    if range.0 != 0 {
-        // Find the first '\n' character from the beginning
-        let offset_0 = match buff.as_slice().iter().position(|&c| c == b'\n') {
-            Some(pos) => pos,
-            None => 0, // No '\n' found, nothing to trim
-        };
-
-        // drain the vector from the beginning to the first '\n' character
-        buff.drain(0..offset_0);
-    }
-
-    // Calculate the offset in the buff to beginning of the padding
-    // accounting for the removed positions form the beginning (offset_0)
-    let offset_1: usize = (range.1 - range.0) as usize - offset_0;
-
-    let next_newline = match buff.as_slice()[(offset_1 as usize)..]
-        .iter()
-        .position(|&c| c == b'\n')
-    {
-        Some(pos) => pos,
-        None => 0, // No '\n' found, nothing to trim
-    };
-
-    // drain the buffer from the last newline found in the padding to the end of the buffer
-    buff.drain(offset_1 + next_newline..);
-}
-
 pub async fn sort(
     burst_middleware: Middleware,
     bucket: String,
     key: String,
     obj_size: u32,
     sort_column: u32,
-    delimiter: char,
     num_partitions: u32,
     partition_idx: u32,
     bounds: Vec<String>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let df = fetch_partition(bucket, key, obj_size, num_partitions, partition_idx).await;
+
+    let column_name = df.get_column_names()[sort_column as usize].to_string();
+    let schema = df.schema().clone();
+    shuffle_partition(&burst_middleware, &df, &column_name, bounds).await;
+
+    let mut agg_df =
+        aggregate_and_sort(burst_middleware, column_name, schema, num_partitions).await;
+
+    let mut buf = Vec::new();
+    let write_start_t = Instant::now();
+    CsvWriter::new(&mut buf)
+        .has_header(false)
+        .finish(&mut agg_df)
+        .unwrap();
+    let write_duration = write_start_t.elapsed();
+    println!("Write time: {:?}", write_duration);
+
+    Ok(String::from("Hello"))
+    // Ok(String::from("Hello")
+}
+
+async fn fetch_partition(
+    bucket: String,
+    key: String,
+    obj_size: u32,
+    num_partitions: u32,
+    partition_idx: u32,
+) -> DataFrame {
     // let region_provider = RegionProviderChain::first_try(Region::new("us-east-1"));
     // let conf = aws_config::from_env().region(region_provider).load().await;
     // let s3_config_builder =
@@ -108,15 +106,51 @@ pub async fn sort(
         .has_header(false)
         .finish()
         .unwrap();
-    let column_name = df.get_column_names()[sort_column as usize];
+    df
+}
 
-    // select column as series
+fn trim_chunk(buff: &mut Vec<u8>, range: (u32, u32)) {
+    let offset_0: usize = 0;
+
+    if range.0 != 0 {
+        // Find the first '\n' character from the beginning
+        let offset_0 = match buff.as_slice().iter().position(|&c| c == b'\n') {
+            Some(pos) => pos,
+            None => 0, // No '\n' found, nothing to trim
+        };
+
+        // drain the vector from the beginning to the first '\n' character
+        buff.drain(0..offset_0);
+    }
+
+    // Calculate the offset in the buff to beginning of the padding
+    // accounting for the removed positions form the beginning (offset_0)
+    let offset_1: usize = (range.1 - range.0) as usize - offset_0;
+
+    let next_newline = match buff.as_slice()[(offset_1 as usize)..]
+        .iter()
+        .position(|&c| c == b'\n')
+    {
+        Some(pos) => pos,
+        None => 0, // No '\n' found, nothing to trim
+    };
+
+    // drain the buffer from the last newline found in the padding to the end of the buffer
+    buff.drain(offset_1 + next_newline..);
+}
+
+async fn shuffle_partition(
+    burst_middleware: &Middleware,
+    df: &DataFrame,
+    column_name: &String,
+    bounds: Vec<String>,
+) {
     let search_start_t = Instant::now();
 
     // save index in a hashmap
     let mut partitions: HashMap<u32, Vec<u32>> = HashMap::new();
 
-    for (idx, value) in df[column_name].iter().enumerate() {
+    for (idx, value) in df[column_name.as_str()].iter().enumerate() {
         // println!("{}", x);
         let res = match value {
             AnyValue::Utf8(s) => bounds.binary_search(&s.to_string()),
@@ -160,8 +194,15 @@ pub async fn sort(
             Err(_) => println!("Error"),
         }
     }
+}
 
-    let agg_df = DataFrame::from_rows_and_schema(&[], &df.schema()).unwrap();
+async fn aggregate_and_sort(
+    burst_middleware: Middleware,
+    column_name: String,
+    schema: Schema,
+    num_partitions: u32,
+) -> DataFrame {
+    let agg_df = DataFrame::from_rows_and_schema(&[], &schema).unwrap();
     for _ in 0..num_partitions {
         let res = burst_middleware.recv().await;
         match res {
@@ -187,7 +228,9 @@ pub async fn sort(
     };
 
     let sort_start_t = Instant::now();
-    let mut agg_df = agg_df.sort_with_options(column_name, sort_options).unwrap();
+    let mut agg_df = agg_df
+        .sort_with_options(column_name.as_str(), sort_options)
+        .unwrap();
     let sort_duration = sort_start_t.elapsed();
     println!("Sort time: {:?}", sort_duration);
 
@@ -212,16 +255,5 @@ pub async fn sort(
     // get column as series
     // let column = df.get(sort_column as usize).unwrap();
     // column.binary_search();
-
-    let mut buf = Vec::new();
-    let write_start_t = Instant::now();
-    CsvWriter::new(&mut buf)
-        .has_header(false)
-        .finish(&mut agg_df)
-        .unwrap();
-    let write_duration = write_start_t.elapsed();
-    println!("Write time: {:?}", write_duration);
-
-    return Ok(String::from("Hello"));
-    // Ok(String::from("Hello")
+    agg_df
 }
