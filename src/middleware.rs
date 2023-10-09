@@ -6,6 +6,8 @@ use tokio::sync::{
     Mutex,
 };
 
+use tokio::sync::broadcast::{Receiver, Sender};
+
 use futures::{FutureExt, StreamExt};
 use lapin::{
     message::Delivery,
@@ -27,32 +29,53 @@ use crate::types::Message;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
 
+const DEFAULT_BROADCAST_CHANNEL_SIZE: usize = 1024;
+
 #[derive(Debug, Clone)]
 pub struct MiddlewareArguments {
     rabbitmq_uri: String,
-    exchange_name: String,
+    direct_exchage: String,
+    broadcast_exchage_prefix: String,
     queue_prefix: String,
     global_range: Range<u32>,
     local_range: Range<u32>,
+    broadcast_range: Range<u32>,
+    broadcast_channel_size: usize,
 }
 
 impl MiddlewareArguments {
-    pub fn new(rabbitmq_uri: String, global_range: Range<u32>, local_range: Range<u32>) -> Self {
+    pub fn new(
+        rabbitmq_uri: String,
+        global_range: Range<u32>,
+        local_range: Range<u32>,
+        broadcast_range: Range<u32>,
+    ) -> Self {
         Self {
             rabbitmq_uri,
-            exchange_name: "exchange".to_string(),
+            direct_exchage: "exchange".to_string(),
+            broadcast_exchage_prefix: "broadcast".to_string(),
             queue_prefix: "queue".to_string(),
             global_range,
             local_range,
+            broadcast_range,
+            broadcast_channel_size: DEFAULT_BROADCAST_CHANNEL_SIZE,
         }
     }
 
     impl_chainable_setter! {
-        exchange_name, String
+        direct_exchage, String
+    }
+
+    impl_chainable_setter! {
+        broadcast_exchage_prefix, String
     }
 
     impl_chainable_setter! {
         queue_prefix, String
+    }
+
+    impl_chainable_setter! {
+        broadcast_channel_size, usize
     }
 }
 
@@ -67,27 +90,46 @@ pub struct Middleware {
     local_channel_tx: HashMap<u32, UnboundedSender<Message>>,
     local_channel_rx: HashMap<u32, Arc<Mutex<UnboundedReceiver<Message>>>>,
 
+    broadcast_channel_tx: Sender<Message>,
+    broadcast_channel_rx: HashMap<u32, Arc<Mutex<Receiver<Message>>>>,
+
     consumer: Option<Consumer>,
 
-    id: Option<u32>,
+    worker_id: Option<u32>,
+    group_id: u32,
 }
 
 impl Middleware {
-    pub async fn init_global(args: MiddlewareArguments) -> Result<Self> {
+    pub async fn init_global(args: MiddlewareArguments, group_id: u32) -> Result<Self> {
         let rabbitmq_conn =
             Connection::connect(&args.rabbitmq_uri, ConnectionProperties::default()).await?;
 
         // TODO: set publisher_confirms to true
         let channel = rabbitmq_conn.create_channel().await?;
 
-        // Declare exchange
+        // Declare direct exchange
         let mut options = ExchangeDeclareOptions::default();
         options.durable = true;
 
         channel
             .exchange_declare(
-                &args.exchange_name,
+                &args.direct_exchage,
                 ExchangeKind::Direct,
+                options,
+                FieldTable::default(),
+            )
+            .await?;
+
+        // Declare broadcast exchange for this group
+        let exchange_name: String = format!("{}_{}", args.broadcast_exchage_prefix, group_id);
+
+        let mut options = ExchangeDeclareOptions::default();
+        options.durable = true;
+
+        channel
+            .exchange_declare(
+                &exchange_name,
+                ExchangeKind::Fanout,
                 options,
                 FieldTable::default(),
             )
@@ -115,8 +157,20 @@ impl Middleware {
         futures::future::try_join_all(queues.iter().map(|queue| {
             channel.queue_bind(
                 queue.name().as_str(),
-                &args.exchange_name,
+                &args.direct_exchage,
                 queue.name().as_str(),
+                QueueBindOptions::default(),
+                FieldTable::default(),
+            )
+        }))
+        .await?;
+
+        // Bind local queues to this group's broadcast exchange
+        futures::future::try_join_all(local_queues.values().map(|queue| {
+            channel.queue_bind(
+                queue,
+                &exchange_name,
+                queue,
                 QueueBindOptions::default(),
                 FieldTable::default(),
             )
@@ -135,6 +189,15 @@ impl Middleware {
             local_channel_rx.insert(id, Arc::new(Mutex::new(rx)));
         }
 
+        // create broadcast channel for this group
+        let (tx, _) = tokio::sync::broadcast::channel::<Message>(args.broadcast_channel_size);
+        let mut broadcast_channel_rx = HashMap::new();
+
+        // subscribe to all broadcast channels for each thread
+        args.local_range.clone().for_each(|id| {
+            broadcast_channel_rx.insert(id, Arc::new(Mutex::new(tx.subscribe())));
+        });
+
         Ok(Self {
             options: args,
             rabbitmq_conn: Arc::new(rabbitmq_conn),
@@ -142,14 +205,17 @@ impl Middleware {
             local_queues,
             local_channel_tx,
             local_channel_rx,
+            broadcast_channel_tx: tx,
+            broadcast_channel_rx,
             consumer: None,
-            id: None,
+            worker_id: None,
+            group_id,
         })
     }
 
     pub async fn init_local(&mut self, id: u32) -> Result<()> {
         self.rabbitmq_channel = Some(self.rabbitmq_conn.create_channel().await?);
-        self.id = Some(id);
+        self.worker_id = Some(id);
         let mut options = BasicConsumeOptions::default();
         options.no_ack = true;
         self.consumer = Some(
@@ -157,11 +223,11 @@ impl Middleware {
                 .as_ref()
                 .unwrap()
                 .basic_consume(
-                    &self.local_queues.get(&self.id.unwrap()).unwrap(),
+                    &self.local_queues.get(&self.worker_id.unwrap()).unwrap(),
                     &format!(
                         "{}_{} consumer",
                         self.options.queue_prefix,
-                        self.id.unwrap()
+                        self.worker_id.unwrap()
                     ),
                     options,
                     FieldTable::default(),
@@ -175,7 +241,7 @@ impl Middleware {
         let chunk_id = 0;
         let last_chunk = true;
 
-        if self.rabbitmq_channel.is_none() | self.id.is_none() {
+        if self.rabbitmq_channel.is_none() | self.worker_id.is_none() {
             return Err("init_local() must be called before send()".into());
         }
 
@@ -185,7 +251,7 @@ impl Middleware {
         if self.options.local_range.contains(&dest) {
             if let Some(tx) = self.local_channel_tx.get(&dest) {
                 tx.send(Message {
-                    sender_id: self.id.unwrap(),
+                    sender_id: self.worker_id.unwrap(),
                     data,
                     chunk_id,
                     last_chunk,
@@ -195,7 +261,10 @@ impl Middleware {
             }
         } else {
             let mut fields = FieldTable::default();
-            fields.insert("sender_id".into(), AMQPValue::LongUInt(self.id.unwrap()));
+            fields.insert(
+                "sender_id".into(),
+                AMQPValue::LongUInt(self.worker_id.unwrap()),
+            );
             fields.insert("chunk_id".into(), AMQPValue::LongUInt(chunk_id));
             fields.insert("last_chunk".into(), AMQPValue::Boolean(last_chunk));
 
@@ -203,7 +272,7 @@ impl Middleware {
                 .as_ref()
                 .unwrap()
                 .basic_publish(
-                    &self.options.exchange_name,
+                    &self.options.direct_exchage,
                     &format!("{}_{}", self.options.queue_prefix, dest),
                     BasicPublishOptions::default(),
                     &data,
@@ -214,24 +283,101 @@ impl Middleware {
         Ok(())
     }
 
+    pub async fn broadcast(&self, data: Bytes) -> Result<()> {
+        let chunk_id = 0;
+        let last_chunk = true;
+
+        if self.rabbitmq_channel.is_none() | self.worker_id.is_none() {
+            return Err("init_local() must be called before send()".into());
+        }
+
+        self.broadcast_channel_tx.send(Message {
+            sender_id: self.worker_id.unwrap(),
+            data: data.clone(),
+            chunk_id,
+            last_chunk,
+        })?;
+
+        futures::future::try_join_all(
+            self.options
+                .broadcast_range
+                .clone()
+                .filter(|dest| if *dest == self.group_id { false } else { true })
+                .map(|dest| {
+                    let mut fields = FieldTable::default();
+                    fields.insert(
+                        "sender_id".into(),
+                        AMQPValue::LongUInt(self.worker_id.unwrap()),
+                    );
+                    fields.insert("chunk_id".into(), AMQPValue::LongUInt(chunk_id));
+                    fields.insert("last_chunk".into(), AMQPValue::Boolean(last_chunk));
+
+                    self.rabbitmq_channel.as_ref().unwrap().basic_publish(
+                        format!("{}_{}", self.options.broadcast_exchage_prefix, dest).leak(),
+                        "",
+                        BasicPublishOptions::default(),
+                        &data,
+                        BasicProperties::default().with_headers(fields),
+                    )
+                }),
+        )
+        .await?;
+
+        for dest in self.options.broadcast_range.clone() {
+            if dest == self.group_id {
+                continue;
+            }
+            let mut fields = FieldTable::default();
+            fields.insert(
+                "sender_id".into(),
+                AMQPValue::LongUInt(self.worker_id.unwrap()),
+            );
+            fields.insert("chunk_id".into(), AMQPValue::LongUInt(chunk_id));
+            fields.insert("last_chunk".into(), AMQPValue::Boolean(last_chunk));
+
+            self.rabbitmq_channel
+                .as_ref()
+                .unwrap()
+                .basic_publish(
+                    &format!("{}_{}", self.options.broadcast_exchage_prefix, dest),
+                    "",
+                    BasicPublishOptions::default(),
+                    &data,
+                    BasicProperties::default().with_headers(fields),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn try_rcv(&self) -> Result<Option<Message>> {
-        if self.rabbitmq_channel.is_none() || self.id.is_none() || self.consumer.is_none() {
+        if self.rabbitmq_channel.is_none() || self.worker_id.is_none() || self.consumer.is_none() {
             return Err("init_local() must be called before receive()".into());
         }
 
-        if let Some(rx) = self.local_channel_rx.get(&self.id.unwrap()) {
+        // Receive from local channel
+        if let Some(rx) = self.local_channel_rx.get(&self.worker_id.unwrap()) {
             // try receive without blocking
             if let Ok(msg) = rx.lock().await.try_recv() {
                 return Ok(Some(msg));
             }
         }
 
-        // try receive without blocking
+        // Receive from broadcast channel
+        if let Some(rx) = self.broadcast_channel_rx.get(&self.worker_id.unwrap()) {
+            // try receive without blocking
+            if let Ok(msg) = rx.lock().await.try_recv() {
+                return Ok(Some(msg));
+            }
+        }
+
+        // Receive from rabbitmq
         if let Some(delivery) = self
             .consumer
             .clone()
             .unwrap()
             .next()
+            // try receive without blocking
             .now_or_never()
             .flatten()
         {
@@ -245,18 +391,33 @@ impl Middleware {
 
     pub async fn recv(&self) -> Result<Message> {
         if self.rabbitmq_channel.is_none()
-            || self.id.is_none()
+            || self.worker_id.is_none()
             || self.consumer.is_none()
-            || !self.local_channel_rx.contains_key(&self.id.unwrap())
+            || !self.local_channel_rx.contains_key(&self.worker_id.unwrap())
         {
             return Err("init_local() must be called before receive()".into());
         }
 
-        let rx = self.local_channel_rx.get(&self.id.unwrap()).unwrap();
+        let rx = self.local_channel_rx.get(&self.worker_id.unwrap()).unwrap();
 
-        // receive blocking
-        let handle = async {
+        // Receive from local channel
+        let local = async {
+            // receive blocking
             let msg = rx.lock().await.recv().await.unwrap();
+            Ok::<Message, Error>(msg)
+        };
+
+        // Receive from broadcast channel
+        let broadcast = async {
+            // receive blocking
+            let msg = self
+                .broadcast_channel_rx
+                .get(&self.worker_id.unwrap())
+                .unwrap()
+                .lock()
+                .await
+                .recv()
+                .await?;
             Ok::<Message, Error>(msg)
         };
 
@@ -269,8 +430,9 @@ impl Middleware {
         };
 
         tokio::select! {
+            msg = local => Ok(msg?),
+            msg = broadcast => Ok(msg?),
             msg = fut => Ok(msg?),
-            msg = handle => Ok(msg?),
         }
     }
 
