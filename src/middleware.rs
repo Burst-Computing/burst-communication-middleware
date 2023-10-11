@@ -29,7 +29,7 @@ use crate::types::Message;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
 
-const DEFAULT_BROADCAST_CHANNEL_SIZE: usize = 1024;
+const DEFAULT_BROADCAST_CHANNEL_SIZE: usize = 10240;
 
 #[derive(Debug, Clone)]
 pub struct MiddlewareArguments {
@@ -76,6 +76,10 @@ impl MiddlewareArguments {
 
     impl_chainable_setter! {
         broadcast_channel_size, usize
+    }
+
+    pub fn build(&mut self) -> Self {
+        self.clone()
     }
 }
 
@@ -283,71 +287,87 @@ impl Middleware {
         Ok(())
     }
 
-    pub async fn broadcast(&self, data: Bytes) -> Result<()> {
-        let chunk_id = 0;
-        let last_chunk = true;
-
+    pub async fn broadcast(&self, data: Option<Bytes>) -> Result<Option<Message>> {
         if self.rabbitmq_channel.is_none() | self.worker_id.is_none() {
-            return Err("init_local() must be called before send()".into());
+            return Err("init_local() must be called before broadcast()".into());
         }
 
-        self.broadcast_channel_tx.send(Message {
-            sender_id: self.worker_id.unwrap(),
-            data: data.clone(),
-            chunk_id,
-            last_chunk,
-        })?;
+        // If there is some data, broadcast it
+        if let Some(data) = data {
+            let chunk_id = 0;
+            let last_chunk = true;
 
-        futures::future::try_join_all(
-            self.options
-                .broadcast_range
-                .clone()
-                .filter(|dest| if *dest == self.group_id { false } else { true })
-                .map(|dest| {
-                    let mut fields = FieldTable::default();
-                    fields.insert(
-                        "sender_id".into(),
-                        AMQPValue::LongUInt(self.worker_id.unwrap()),
-                    );
-                    fields.insert("chunk_id".into(), AMQPValue::LongUInt(chunk_id));
-                    fields.insert("last_chunk".into(), AMQPValue::Boolean(last_chunk));
+            self.broadcast_channel_tx.send(Message {
+                sender_id: self.worker_id.unwrap(),
+                data: data.clone(),
+                chunk_id,
+                last_chunk,
+            })?;
 
-                    self.rabbitmq_channel.as_ref().unwrap().basic_publish(
-                        format!("{}_{}", self.options.broadcast_exchage_prefix, dest).leak(),
-                        "",
-                        BasicPublishOptions::default(),
-                        &data,
-                        BasicProperties::default().with_headers(fields),
-                    )
-                }),
-        )
-        .await?;
+            futures::future::try_join_all(
+                self.options
+                    .broadcast_range
+                    .clone()
+                    .filter(|dest| if *dest == self.group_id { false } else { true })
+                    .map(|dest| {
+                        let mut fields = FieldTable::default();
+                        fields.insert(
+                            "sender_id".into(),
+                            AMQPValue::LongUInt(self.worker_id.unwrap()),
+                        );
+                        fields.insert("chunk_id".into(), AMQPValue::LongUInt(chunk_id));
+                        fields.insert("last_chunk".into(), AMQPValue::Boolean(last_chunk));
 
-        for dest in self.options.broadcast_range.clone() {
-            if dest == self.group_id {
-                continue;
-            }
-            let mut fields = FieldTable::default();
-            fields.insert(
-                "sender_id".into(),
-                AMQPValue::LongUInt(self.worker_id.unwrap()),
-            );
-            fields.insert("chunk_id".into(), AMQPValue::LongUInt(chunk_id));
-            fields.insert("last_chunk".into(), AMQPValue::Boolean(last_chunk));
+                        println!("broadcasting to {}", dest);
+                        self.rabbitmq_channel.as_ref().unwrap().basic_publish(
+                            format!("{}_{}", self.options.broadcast_exchage_prefix, dest).leak(),
+                            "",
+                            BasicPublishOptions::default(),
+                            &data,
+                            BasicProperties::default().with_headers(fields),
+                        )
+                    }),
+            )
+            .await?;
 
-            self.rabbitmq_channel
-                .as_ref()
+            // Consume self broadcast message to avoid receiving it in the next receive
+            self.broadcast_channel_rx
+                .get(&self.worker_id.unwrap())
                 .unwrap()
-                .basic_publish(
-                    &format!("{}_{}", self.options.broadcast_exchage_prefix, dest),
-                    "",
-                    BasicPublishOptions::default(),
-                    &data,
-                    BasicProperties::default().with_headers(fields),
-                )
+                .lock()
+                .await
+                .recv()
                 .await?;
+            Ok(None)
+        // Otherwise, wait for broadcast message
+        } else {
+            // Receive from local channel
+            let local = async {
+                // receive blocking
+                let msg = self
+                    .broadcast_channel_rx
+                    .get(&self.worker_id.unwrap())
+                    .unwrap()
+                    .lock()
+                    .await
+                    .recv()
+                    .await?;
+                Ok::<Message, Error>(msg)
+            };
+
+            // Receive from rabbitmq
+            let fut = async {
+                // receive blocking
+                let delivery = self.consumer.clone().unwrap().next().await.unwrap()?;
+                //delivery.ack(BasicAckOptions::default()).await?;
+                Ok::<Message, Error>(Self::get_message(delivery))
+            };
+
+            tokio::select! {
+                msg = local => Ok::<Option<Message>, Error>(Some(msg?)),
+                msg = fut => Ok::<Option<Message>, Error>(Some(msg?)),
+            }
         }
-        Ok(())
     }
 
     pub async fn try_rcv(&self) -> Result<Option<Message>> {
@@ -357,14 +377,6 @@ impl Middleware {
 
         // Receive from local channel
         if let Some(rx) = self.local_channel_rx.get(&self.worker_id.unwrap()) {
-            // try receive without blocking
-            if let Ok(msg) = rx.lock().await.try_recv() {
-                return Ok(Some(msg));
-            }
-        }
-
-        // Receive from broadcast channel
-        if let Some(rx) = self.broadcast_channel_rx.get(&self.worker_id.unwrap()) {
             // try receive without blocking
             if let Ok(msg) = rx.lock().await.try_recv() {
                 return Ok(Some(msg));
@@ -407,20 +419,6 @@ impl Middleware {
             Ok::<Message, Error>(msg)
         };
 
-        // Receive from broadcast channel
-        let broadcast = async {
-            // receive blocking
-            let msg = self
-                .broadcast_channel_rx
-                .get(&self.worker_id.unwrap())
-                .unwrap()
-                .lock()
-                .await
-                .recv()
-                .await?;
-            Ok::<Message, Error>(msg)
-        };
-
         // Receive from rabbitmq
         let fut = async {
             // receive blocking
@@ -431,7 +429,6 @@ impl Middleware {
 
         tokio::select! {
             msg = local => Ok(msg?),
-            msg = broadcast => Ok(msg?),
             msg = fut => Ok(msg?),
         }
     }
