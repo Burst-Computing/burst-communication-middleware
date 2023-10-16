@@ -29,7 +29,7 @@ use crate::types::Message;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
 
-const DEFAULT_BROADCAST_CHANNEL_SIZE: usize = 10240;
+const DEFAULT_BROADCAST_CHANNEL_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct MiddlewareArguments {
