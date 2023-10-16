@@ -318,7 +318,6 @@ impl Middleware {
                         fields.insert("chunk_id".into(), AMQPValue::LongUInt(chunk_id));
                         fields.insert("last_chunk".into(), AMQPValue::Boolean(last_chunk));
 
-                        println!("broadcasting to {}", dest);
                         self.rabbitmq_channel.as_ref().unwrap().basic_publish(
                             format!("{}_{}", self.options.broadcast_exchage_prefix, dest).leak(),
                             "",
