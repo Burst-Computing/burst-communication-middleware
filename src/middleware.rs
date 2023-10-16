@@ -54,6 +54,10 @@ impl MiddlewareArguments {
     impl_chainable_setter! {
         queue_prefix, String
     }
+
+    pub fn build(&mut self) -> Self {
+        self.clone()
+    }
 }
 
 #[derive(Clone)]
