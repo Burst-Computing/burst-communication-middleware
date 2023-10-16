@@ -124,20 +124,19 @@ impl Middleware {
             )
             .await?;
 
-        // Declare broadcast exchange for this group
-        let exchange_name: String = format!("{}_{}", args.broadcast_exchage_prefix, group_id);
-
+        // Declare broadcast exchanges for each group
         let mut options = ExchangeDeclareOptions::default();
         options.durable = true;
 
-        channel
-            .exchange_declare(
-                &exchange_name,
+        futures::future::try_join_all(args.broadcast_range.clone().map(|id| {
+            channel.exchange_declare(
+                format!("{}_{}", args.broadcast_exchage_prefix, id).leak(),
                 ExchangeKind::Fanout,
                 options,
                 FieldTable::default(),
             )
-            .await?;
+        }))
+        .await?;
 
         // Declare all queues
         let mut options = QueueDeclareOptions::default();
@@ -170,6 +169,7 @@ impl Middleware {
         .await?;
 
         // Bind local queues to this group's broadcast exchange
+        let exchange_name = format!("{}_{}", args.broadcast_exchage_prefix, group_id);
         futures::future::try_join_all(local_queues.values().map(|queue| {
             channel.queue_bind(
                 queue,
