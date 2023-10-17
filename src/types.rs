@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Message {
     pub sender_id: u32,
     pub chunk_id: u32,
