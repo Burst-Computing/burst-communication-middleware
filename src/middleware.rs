@@ -137,7 +137,7 @@ pub async fn create_group_handlers(args: MiddlewareArguments) -> Result<Vec<Burs
         channel.queue_bind(
             format!("burst_{}_worker-{}", args.burst_id, worker_id).leak(),
             format!("burst_{}_fanout-group-{}", args.burst_id, args.group_id).leak(),
-            format!("burst_{}_worker-{}", args.burst_id, worker_id).leak(),
+            "",
             QueueBindOptions::default(),
             FieldTable::default(),
         )
@@ -234,7 +234,7 @@ impl BurstMiddleware {
 
                 self.rabbitmq_channel
                     .basic_publish(
-                        &format!("burst_{}_fanout-group-{}", self.burst_id, target),
+                        &format!("burst_{}_direct", self.burst_id),
                         &format!("burst_{}_worker-{}", self.burst_id, target),
                         BasicPublishOptions::default(),
                         &data,
