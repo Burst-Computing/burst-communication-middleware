@@ -31,6 +31,8 @@ type Result<T> = std::result::Result<T, Error>;
 
 const DEFAULT_BROADCAST_CHANNEL_SIZE: usize = 1024 * 1024;
 
+const ROOT_ID: u32 = 0;
+
 #[derive(Debug, Clone)]
 pub struct MiddlewareArguments {
     rabbitmq_uri: String,
@@ -366,6 +368,66 @@ impl Middleware {
                 msg = local => Ok::<Option<Message>, Error>(Some(msg?)),
                 msg = fut => Ok::<Option<Message>, Error>(Some(msg?)),
             }
+        }
+    }
+
+    pub async fn gather(&self, data: Bytes) -> Result<Option<Vec<Message>>> {
+        if self.rabbitmq_channel.is_none() | self.worker_id.is_none() {
+            return Err("init_local() must be called before gather()".into());
+        }
+
+        if self.worker_id.unwrap() == ROOT_ID {
+            let mut gathered = Vec::new();
+            gathered.push(Message {
+                sender_id: self.worker_id.unwrap(),
+                data,
+                chunk_id: 0,
+                last_chunk: true,
+            });
+
+            let local = futures::future::try_join_all(
+                self.options
+                    .local_range
+                    .clone()
+                    .filter(|id| *id != self.worker_id.unwrap())
+                    .map(|_| async move {
+                        Ok::<Message, Error>(
+                            self.local_channel_rx
+                                .get(&ROOT_ID)
+                                .unwrap()
+                                .lock()
+                                .await
+                                .recv()
+                                .await
+                                .unwrap(),
+                        )
+                    }),
+            );
+
+            let remote = futures::future::try_join_all(
+                self.options
+                    .global_range
+                    .clone()
+                    .filter(|id| !self.options.local_range.contains(id))
+                    .map(|_| async move {
+                        Ok::<Message, Error>(Self::get_message(
+                            self.consumer.clone().unwrap().next().await.unwrap()?,
+                        ))
+                    }),
+            );
+
+            let (local, remote) = tokio::try_join!(local, remote)?;
+
+            gathered.extend(local);
+            gathered.extend(remote);
+
+            // Sort by sender_id
+            gathered.sort_by_key(|msg| msg.sender_id);
+
+            Ok(Some(gathered))
+        } else {
+            self.send(ROOT_ID, data).await?;
+            Ok(None)
         }
     }
 
