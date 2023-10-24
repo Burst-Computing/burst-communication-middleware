@@ -2,6 +2,9 @@ use std::fmt::{Debug, Display};
 
 use bytes::Bytes;
 
+pub type Error = Box<dyn std::error::Error + Send + Sync>;
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Clone)]
 pub struct Message {
     pub sender_id: u32,
