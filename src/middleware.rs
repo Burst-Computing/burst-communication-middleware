@@ -53,6 +53,7 @@ pub trait Middleware {
 
 #[derive(Clone, Debug)]
 pub struct MiddlewareOptions {
+    pub burst_id: String,
     pub global_range: Range<u32>,
     pub local_range: Range<u32>,
     pub broadcast_range: Range<u32>,
@@ -61,11 +62,13 @@ pub struct MiddlewareOptions {
 
 impl MiddlewareOptions {
     pub fn new(
+        burst_id: String,
         global_range: Range<u32>,
         local_range: Range<u32>,
         broadcast_range: Range<u32>,
     ) -> Self {
         Self {
+            burst_id,
             global_range,
             local_range,
             broadcast_range,
