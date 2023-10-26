@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
@@ -94,7 +97,7 @@ pub struct BurstMiddleware {
 
     remote_send_receive: Box<dyn SendReceiveProxy>,
 
-    counters: RwLock<HashMap<CollectiveType, u32>>,
+    counters: HashMap<CollectiveType, AtomicU32>,
 
     messages_buff: RwLock<HashMap<CollectiveType, RwLock<HashMap<u32, RwLock<Vec<Message>>>>>>,
 }
@@ -155,7 +158,7 @@ impl BurstMiddleware {
         broadcast_channel_tx: Sender<Message>,
         broadcast_channel_rx: Receiver<Message>,
         worker_id: u32,
-        current_group: HashSet<u32>,
+        group: HashSet<u32>,
     ) -> BurstMiddleware {
         // create counters
         let mut counters = HashMap::new();
@@ -164,19 +167,19 @@ impl BurstMiddleware {
             CollectiveType::Gather,
             CollectiveType::Scatter,
         ] {
-            counters.insert(*collective, 0);
+            counters.insert(*collective, AtomicU32::new(0));
         }
 
         Self {
             options,
             worker_id,
-            group: current_group,
+            group,
             local_channel_tx,
             local_channel_rx: Mutex::new(local_channel_rx),
             broadcast_channel_tx,
             broadcast_channel_rx: Mutex::new(broadcast_channel_rx),
             remote_send_receive: remote_proxy,
-            counters: RwLock::new(counters),
+            counters,
             messages_buff: RwLock::new(HashMap::new()),
         }
     }
@@ -512,14 +515,16 @@ impl BurstMiddleware {
     }
 
     async fn get_counter(&self, collective: &CollectiveType) -> u32 {
-        *self.counters.read().await.get(collective).unwrap()
+        self.counters
+            .get(collective)
+            .unwrap()
+            .load(Ordering::Relaxed)
     }
 
     async fn increment_counter(&self, collective: &CollectiveType) {
         self.counters
-            .write()
-            .await
-            .entry(*collective)
-            .and_modify(|c| *c += 1);
+            .get(collective)
+            .unwrap()
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
