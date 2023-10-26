@@ -50,12 +50,12 @@ pub struct BurstOptions {
     pub broadcast_channel_size: usize,
 }
 
-pub struct BurstInfo {
-    pub burst_id: String,
+pub struct BurstInfo<'a> {
+    pub burst_id: &'a str,
     pub burst_size: u32,
-    pub group_ranges: HashMap<String, HashSet<u32>>,
+    pub group_ranges: &'a HashMap<String, HashSet<u32>>,
     pub worker_id: u32,
-    pub group_id: String,
+    pub group_id: &'a str,
 }
 
 impl BurstOptions {
@@ -314,11 +314,11 @@ impl BurstMiddleware {
 
     pub fn info(&self) -> BurstInfo {
         BurstInfo {
-            burst_id: self.options.burst_id.clone(),
+            burst_id: &self.options.burst_id,
             burst_size: self.options.burst_size,
-            group_ranges: self.options.group_ranges.clone(),
+            group_ranges: &self.options.group_ranges,
             worker_id: self.worker_id,
-            group_id: self.options.group_id.clone(),
+            group_id: &self.options.group_id,
         }
     }
 
