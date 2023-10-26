@@ -1,44 +1,65 @@
-use burst_communication_middleware::{create_group_handlers, BurstMiddleware, MiddlewareArguments};
+use burst_communication_middleware::{
+    BurstMiddleware, BurstOptions, RabbitMQMiddleware, RabbitMQOptions,
+};
 use bytes::Bytes;
-use std::error::Error;
+use log::{error, info};
 use std::thread;
+use tracing_subscriber::{
+    fmt, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
+};
 
 #[tokio::main]
 async fn main() {
     env_logger::init();
 
-    let burst_args = MiddlewareArguments::new(
-        "dev".to_string(),
-        2,
-        1,
-        0,
-        0..2,
-        "amqp://rabbit:123456@localhost:5672".to_string(),
-        true,
-        256,
-    );
-    let mut handles = create_group_handlers(burst_args).await.unwrap();
-    let h1 = handles.pop().unwrap();
-    let h2 = handles.pop().unwrap();
+    let burst_options = BurstOptions::new("hello_world".to_string(), 0..2, 0..2, 0..1, 0)
+        .broadcast_channel_size(256)
+        .build();
+
+    let rabbitmq_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+        .durable_queues(true)
+        .ack(true)
+        .build();
+
+    let rabbitmq_middleware =
+        match RabbitMQMiddleware::new(burst_options.clone(), rabbitmq_options).await {
+            Ok(m) => m,
+            Err(e) => {
+                error!("{:?}", e);
+                panic!();
+            }
+        };
+
+    let mut proxies =
+        match BurstMiddleware::create_proxies(burst_options, rabbitmq_middleware).await {
+            Ok(p) => p,
+            Err(e) => {
+                error!("{:?}", e);
+                panic!();
+            }
+        };
+
+    let p1 = proxies.remove(&0).unwrap();
+    let p2 = proxies.remove(&1).unwrap();
 
     let thread_1 = thread::spawn(move || {
-        println!("thread start: id={}", h1.worker_id);
+        info!("thread start: id={}", 0);
         let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap();
-        let result = tokio_runtime.block_on(async { worker(h1).await.unwrap() });
+        let result = tokio_runtime.block_on(async { worker(p1).await.unwrap() });
         // println!("thread end: id={}", handle.worker_id);
         result
     });
 
     let thread_2 = thread::spawn(move || {
-        println!("thread start: id={}", h2.worker_id);
+        info!("thread start: id={}", 0);
         let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap();
-        let result = tokio_runtime.block_on(async { worker(h2).await.unwrap() });
+        let result = tokio_runtime.block_on(async { worker(p2).await.unwrap() });
         // println!("thread end: id={}", handle.worker_id);
         result
     });
@@ -47,12 +68,13 @@ async fn main() {
     thread_2.join().unwrap();
 }
 
-pub async fn worker(
-    mut burst_middleware: BurstMiddleware,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("hi im worker 1: id={}", burst_middleware.worker_id);
-    if burst_middleware.worker_id == 0 {
-        println!("worker {} sending message", burst_middleware.worker_id);
+pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std::error::Error>> {
+    println!("hi im worker 1: id={}", burst_middleware.info().worker_id);
+    if burst_middleware.info().worker_id == 0 {
+        println!(
+            "worker {} sending message",
+            burst_middleware.info().worker_id
+        );
         let message = "hello world".to_string();
         let payload = Bytes::from(message);
         burst_middleware.send(1, payload).await.unwrap();
@@ -60,13 +82,15 @@ pub async fn worker(
         let response = burst_middleware.recv().await.unwrap();
         println!(
             "worker {} received message: {:?}",
-            burst_middleware.worker_id, response
+            burst_middleware.info().worker_id,
+            response
         );
     } else {
         let message = burst_middleware.recv().await.unwrap();
         println!(
             "worker {} received message: {:?}",
-            burst_middleware.worker_id, message
+            burst_middleware.info().worker_id,
+            message
         );
         let response = "bye!".to_string();
         let payload = Bytes::from(response);

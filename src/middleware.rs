@@ -31,47 +31,43 @@ pub trait ReceiveProxy: Send + Sync {
 }
 
 #[async_trait]
-pub trait MiddlewareProxy: Send + Sync {
-    async fn send(&self, dest: u32, data: Bytes) -> Result<()>;
-    async fn recv(&mut self) -> Result<Message>;
-    async fn broadcast(&mut self, data: Option<Bytes>) -> Result<Option<Message>>;
-    async fn gather(&mut self, data: Bytes) -> Result<Option<Vec<Message>>>;
-}
-
-#[async_trait]
 pub trait SendReceiveFactory: Send + Sync {
     async fn create_remote_proxies(&self) -> Result<HashMap<u32, Box<dyn SendReceiveProxy>>>;
 }
 
-#[async_trait]
-pub trait Middleware {
-    async fn create_proxies(
-        &mut self,
-        implementation: impl SendReceiveFactory,
-    ) -> Result<HashMap<u32, Box<dyn MiddlewareProxy>>>;
-}
-
 #[derive(Clone, Debug)]
-pub struct MiddlewareOptions {
+pub struct BurstOptions {
     pub burst_id: String,
     pub global_range: Range<u32>,
     pub local_range: Range<u32>,
     pub broadcast_range: Range<u32>,
+    pub group_id: u32,
     pub broadcast_channel_size: usize,
 }
 
-impl MiddlewareOptions {
+pub struct BurstInfo {
+    pub burst_id: String,
+    pub global_range: Range<u32>,
+    pub local_range: Range<u32>,
+    pub broadcast_range: Range<u32>,
+    pub worker_id: u32,
+    pub group_id: u32,
+}
+
+impl BurstOptions {
     pub fn new(
         burst_id: String,
         global_range: Range<u32>,
         local_range: Range<u32>,
         broadcast_range: Range<u32>,
+        group_id: u32,
     ) -> Self {
         Self {
             burst_id,
             global_range,
             local_range,
             broadcast_range,
+            group_id,
             broadcast_channel_size: DEFAULT_BROADCAST_CHANNEL_SIZE,
         }
     }
@@ -86,17 +82,28 @@ impl MiddlewareOptions {
 }
 
 pub struct BurstMiddleware {
-    options: MiddlewareOptions,
+    options: BurstOptions,
 
-    local_channel_tx: HashMap<u32, UnboundedSender<Message>>,
-    local_channel_rx: HashMap<u32, UnboundedReceiver<Message>>,
+    worker_id: u32,
+
+    local_channel_tx: Arc<HashMap<u32, UnboundedSender<Message>>>,
+    local_channel_rx: Mutex<UnboundedReceiver<Message>>,
 
     broadcast_channel_tx: Sender<Message>,
-    broadcast_channel_rx: HashMap<u32, Receiver<Message>>,
+    broadcast_channel_rx: Mutex<Receiver<Message>>,
+
+    remote_send_receive: Box<dyn SendReceiveProxy>,
+
+    counters: RwLock<HashMap<CollectiveType, u32>>,
+
+    messages_buff: RwLock<HashMap<CollectiveType, RwLock<HashMap<u32, RwLock<Vec<Message>>>>>>,
 }
 
 impl BurstMiddleware {
-    pub fn new(options: MiddlewareOptions) -> BurstMiddleware {
+    pub async fn create_proxies(
+        options: BurstOptions,
+        implementation: impl SendReceiveFactory,
+    ) -> Result<HashMap<u32, BurstMiddleware>> {
         // create local channels
         let mut local_channel_tx = HashMap::new();
         let mut local_channel_rx = HashMap::new();
@@ -116,69 +123,65 @@ impl BurstMiddleware {
             broadcast_channel_rx.insert(id, tx.subscribe());
         });
 
-        Self {
-            options,
-            local_channel_tx,
-            local_channel_rx,
-            broadcast_channel_tx: tx,
-            broadcast_channel_rx,
-        }
-    }
-}
-
-#[async_trait]
-impl Middleware for BurstMiddleware {
-    async fn create_proxies(
-        &mut self,
-        implementation: impl SendReceiveFactory,
-    ) -> Result<HashMap<u32, Box<dyn MiddlewareProxy>>> {
         let mut proxies = HashMap::new();
-
         let remote_proxies = implementation.create_remote_proxies().await?;
-        let local_channel_tx = Arc::new(self.local_channel_tx.clone());
+
+        let local_channel_tx = Arc::new(local_channel_tx);
 
         for (id, proxy) in remote_proxies {
-            let proxy = Box::new(BurstMiddlewareProxy::new(
-                self.options.clone(),
-                id,
-                local_channel_tx.clone(),
-                self.local_channel_rx.remove(&id).unwrap(),
-                self.broadcast_channel_tx.clone(),
-                self.broadcast_channel_rx.remove(&id).unwrap(),
+            let proxy = BurstMiddleware::new(
+                options.clone(),
                 proxy,
-            ));
-            proxies.insert(id, proxy as Box<dyn MiddlewareProxy>);
+                local_channel_tx.clone(),
+                local_channel_rx.remove(&id).unwrap(),
+                tx.clone(),
+                broadcast_channel_rx.remove(&id).unwrap(),
+                id,
+            );
+            proxies.insert(id, proxy);
         }
 
         Ok(proxies)
     }
-}
 
-struct BurstMiddlewareProxy {
-    options: MiddlewareOptions,
+    pub fn new(
+        options: BurstOptions,
+        remote_proxy: Box<dyn SendReceiveProxy>,
+        local_channel_tx: Arc<HashMap<u32, UnboundedSender<Message>>>,
+        local_channel_rx: UnboundedReceiver<Message>,
+        broadcast_channel_tx: Sender<Message>,
+        broadcast_channel_rx: Receiver<Message>,
+        worker_id: u32,
+    ) -> BurstMiddleware {
+        // create counters
+        let mut counters = HashMap::new();
+        for collective in &[
+            CollectiveType::Broadcast,
+            CollectiveType::Gather,
+            CollectiveType::Scatter,
+        ] {
+            counters.insert(*collective, 0);
+        }
 
-    worker_id: u32,
+        Self {
+            options,
+            worker_id,
+            local_channel_tx,
+            local_channel_rx: Mutex::new(local_channel_rx),
+            broadcast_channel_tx,
+            broadcast_channel_rx: Mutex::new(broadcast_channel_rx),
+            remote_send_receive: remote_proxy,
+            counters: RwLock::new(counters),
+            messages_buff: RwLock::new(HashMap::new()),
+        }
+    }
 
-    local_channel_tx: Arc<HashMap<u32, UnboundedSender<Message>>>,
-    local_channel_rx: Mutex<UnboundedReceiver<Message>>,
-
-    broadcast_channel_tx: Sender<Message>,
-    broadcast_channel_rx: Mutex<Receiver<Message>>,
-
-    remote_send_receive: Box<dyn SendReceiveProxy>,
-
-    counters: HashMap<CollectiveType, u32>,
-
-    messages_buff: Arc<RwLock<HashMap<CollectiveType, RwLock<HashMap<u32, RwLock<Vec<Message>>>>>>>,
-}
-
-#[async_trait]
-impl MiddlewareProxy for BurstMiddlewareProxy {
-    async fn send(&self, dest: u32, data: Bytes) -> Result<()> {
+    pub async fn send(&self, dest: u32, data: Bytes) -> Result<()> {
         self.send_collective(dest, data, CollectiveType::None, None)
             .await
     }
-    async fn recv(&mut self) -> Result<Message> {
+
+    pub async fn recv(&self) -> Result<Message> {
         // If there is a message in the buffer, return it
         if let Some(msg) = self.get_message_collective(&CollectiveType::None).await {
             return Ok(msg);
@@ -188,10 +191,10 @@ impl MiddlewareProxy for BurstMiddlewareProxy {
             .await
     }
 
-    async fn broadcast(&mut self, data: Option<Bytes>) -> Result<Option<Message>> {
-        let counter = *self.counters.get(&CollectiveType::Broadcast).unwrap();
+    pub async fn broadcast(&self, data: Option<Bytes>) -> Result<Message> {
+        let counter = self.get_counter(&CollectiveType::Broadcast).await;
 
-        let mut r = None;
+        let m;
 
         // If there is some data, broadcast it
         if let Some(data) = data {
@@ -212,10 +215,12 @@ impl MiddlewareProxy for BurstMiddlewareProxy {
             self.remote_send_receive.as_ref().broadcast(&msg).await?;
 
             // Consume self broadcast message to avoid receiving it in the next receive
-            self.receive_multiple_messages(1, 0, true, |msg| {
-                msg.collective == CollectiveType::Broadcast && msg.counter.unwrap() == counter
-            })
-            .await?;
+            let msgs = self
+                .receive_multiple_messages(1, 0, true, |msg| {
+                    msg.collective == CollectiveType::Broadcast && msg.counter.unwrap() == counter
+                })
+                .await?;
+            m = msgs.into_iter().next().unwrap();
         // Otherwise, wait for broadcast message
         } else {
             // If there is a message in the buffer, return it
@@ -223,31 +228,25 @@ impl MiddlewareProxy for BurstMiddlewareProxy {
                 .get_message_collective(&CollectiveType::Broadcast)
                 .await
             {
-                return Ok(Some(msg));
+                return Ok(msg);
             }
 
-            let counter = *self.counters.get(&CollectiveType::Broadcast).unwrap();
-
             // Else, wait for a broadcast message
-            let msg = self
+            m = self
                 .receive_message(true, |msg| {
                     msg.collective == CollectiveType::Broadcast && msg.counter.unwrap() == counter
                 })
                 .await?;
-
-            r = Some(msg);
         }
 
         // Increment broadcast counter
-        self.counters
-            .entry(CollectiveType::Broadcast)
-            .and_modify(|c| *c += 1);
+        self.increment_counter(&CollectiveType::Broadcast).await;
 
-        Ok(r)
+        Ok(m)
     }
 
-    async fn gather(&mut self, data: Bytes) -> Result<Option<Vec<Message>>> {
-        let counter = *self.counters.get(&CollectiveType::Gather).unwrap();
+    pub async fn gather(&self, data: Bytes) -> Result<Option<Vec<Message>>> {
+        let counter = self.get_counter(&CollectiveType::Gather).await;
 
         let mut r = None;
 
@@ -257,7 +256,7 @@ impl MiddlewareProxy for BurstMiddlewareProxy {
                 sender_id: self.worker_id,
                 chunk_id: 0,
                 last_chunk: true,
-                counter: Some(*self.counters.get(&CollectiveType::Gather).unwrap()),
+                counter: Some(counter),
                 collective: CollectiveType::Gather,
                 data,
             });
@@ -303,44 +302,19 @@ impl MiddlewareProxy for BurstMiddlewareProxy {
         }
 
         // Increment gather counter
-        self.counters
-            .entry(CollectiveType::Gather)
-            .and_modify(|c| *c += 1);
+        self.increment_counter(&CollectiveType::Gather).await;
 
         Ok(r)
     }
-}
 
-impl BurstMiddlewareProxy {
-    pub fn new(
-        options: MiddlewareOptions,
-        worker_id: u32,
-        local_channel_tx: Arc<HashMap<u32, UnboundedSender<Message>>>,
-        local_channel_rx: UnboundedReceiver<Message>,
-        broadcast_channel_tx: Sender<Message>,
-        broadcast_channel_rx: Receiver<Message>,
-        remote_send_receive: Box<dyn SendReceiveProxy>,
-    ) -> Self {
-        // Create counters
-        let mut counters = HashMap::new();
-        for collective in &[
-            CollectiveType::Broadcast,
-            CollectiveType::Gather,
-            CollectiveType::Scatter,
-        ] {
-            counters.insert(*collective, 0);
-        }
-
-        Self {
-            options,
-            worker_id,
-            local_channel_tx,
-            local_channel_rx: Mutex::new(local_channel_rx),
-            broadcast_channel_tx,
-            broadcast_channel_rx: Mutex::new(broadcast_channel_rx),
-            remote_send_receive,
-            counters,
-            messages_buff: Arc::new(RwLock::new(HashMap::new())),
+    pub fn info(&self) -> BurstInfo {
+        BurstInfo {
+            burst_id: self.options.burst_id.clone(),
+            global_range: self.options.global_range.clone(),
+            local_range: self.options.local_range.clone(),
+            broadcast_range: self.options.broadcast_range.clone(),
+            worker_id: self.worker_id,
+            group_id: self.options.group_id,
         }
     }
 
@@ -379,9 +353,9 @@ impl BurstMiddlewareProxy {
         Ok(())
     }
 
-    async fn get_message_collective(&mut self, collective: &CollectiveType) -> Option<Message> {
-        if let Some(msg) = self.messages_buff.as_ref().read().await.get(collective) {
-            if let Some(msgs) = msg.read().await.get(self.counters.get(collective).unwrap()) {
+    async fn get_message_collective(&self, collective: &CollectiveType) -> Option<Message> {
+        if let Some(msg) = self.messages_buff.read().await.get(collective) {
+            if let Some(msgs) = msg.read().await.get(&self.get_counter(collective).await) {
                 if let Some(msg) = msgs.write().await.pop() {
                     return Some(msg);
                 }
@@ -390,10 +364,10 @@ impl BurstMiddlewareProxy {
         None
     }
 
-    async fn get_all_messages_collective(&mut self, collective: &CollectiveType) -> Vec<Message> {
+    async fn get_all_messages_collective(&self, collective: &CollectiveType) -> Vec<Message> {
         let mut r = Vec::new();
-        if let Some(msg) = self.messages_buff.as_ref().read().await.get(collective) {
-            if let Some(msgs) = msg.read().await.get(self.counters.get(collective).unwrap()) {
+        if let Some(msg) = self.messages_buff.read().await.get(collective) {
+            if let Some(msgs) = msg.read().await.get(&self.get_counter(collective).await) {
                 for msg in msgs.write().await.drain(..) {
                     r.push(msg);
                 }
@@ -402,7 +376,7 @@ impl BurstMiddlewareProxy {
         r
     }
 
-    async fn receive_message<P>(&mut self, broadcast: bool, filter: P) -> Result<Message>
+    async fn receive_message<P>(&self, broadcast: bool, filter: P) -> Result<Message>
     where
         P: Fn(&Message) -> bool,
     {
@@ -502,7 +476,7 @@ impl BurstMiddlewareProxy {
     }
 
     async fn save_message(&self, msg: Message) {
-        let messages_buff = self.messages_buff.as_ref().read().await;
+        let messages_buff = self.messages_buff.read().await;
 
         match messages_buff.get(&msg.collective) {
             Some(msgs_by_counter_lock) => {
@@ -523,7 +497,7 @@ impl BurstMiddlewareProxy {
             None => {
                 // Release the lock early
                 drop(messages_buff);
-                let mut messages_buff = self.messages_buff.as_ref().write().await;
+                let mut messages_buff = self.messages_buff.write().await;
 
                 messages_buff.insert(msg.collective, RwLock::new(HashMap::new()));
                 messages_buff
@@ -534,5 +508,17 @@ impl BurstMiddlewareProxy {
                     .insert(msg.counter.unwrap(), RwLock::new(vec![msg]));
             }
         }
+    }
+
+    async fn get_counter(&self, collective: &CollectiveType) -> u32 {
+        *self.counters.read().await.get(collective).unwrap()
+    }
+
+    async fn increment_counter(&self, collective: &CollectiveType) {
+        self.counters
+            .write()
+            .await
+            .entry(*collective)
+            .and_modify(|c| *c += 1);
     }
 }

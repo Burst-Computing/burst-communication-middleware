@@ -1,6 +1,9 @@
-use burst_communication_middleware::{create_group_handlers, BurstMiddleware, MiddlewareArguments};
+use burst_communication_middleware::{
+    BurstMiddleware, BurstOptions, RabbitMQMiddleware, RabbitMQOptions,
+};
 use bytes::Bytes;
 use env_logger;
+use log::{error, info};
 use std::thread;
 use tokio::time::{sleep, Duration};
 
@@ -20,17 +23,31 @@ async fn main() {
 
     let mut threads = Vec::with_capacity(BURST_SIZE as usize);
     for group_id in 0..GROUPS {
-        let burst_args = MiddlewareArguments::new(
-            "dev".to_string(),
-            BURST_SIZE,
-            GROUPS,
-            group_id,
+        let burst_options = BurstOptions::new(
+            "broadcast".to_string(),
+            0..BURST_SIZE,
             (group_size * group_id)..((group_size * group_id) + group_size),
-            "amqp://rabbit:123456@localhost:5672".to_string(),
-            true,
-            256,
-        );
-        let group_threads = group(burst_args).await;
+            0..GROUPS,
+            group_id,
+        )
+        .broadcast_channel_size(256)
+        .build();
+        let rabbitmq_options =
+            RabbitMQOptions::new("amqp://rabbit:123456@localhost:5672".to_string())
+                .durable_queues(true)
+                .ack(true)
+                .build();
+
+        let rabbitmq_middleware =
+            match RabbitMQMiddleware::new(burst_options.clone(), rabbitmq_options).await {
+                Ok(m) => m,
+                Err(e) => {
+                    error!("{:?}", e);
+                    panic!();
+                }
+            };
+
+        let group_threads = group(burst_options, rabbitmq_middleware).await;
         threads.extend(group_threads);
     }
 
@@ -39,20 +56,28 @@ async fn main() {
     }
 }
 
-async fn group(burst_args: MiddlewareArguments) -> Vec<std::thread::JoinHandle<()>> {
-    let handles = create_group_handlers(burst_args).await.unwrap();
+async fn group(
+    burst_options: BurstOptions,
+    rabbitmq_middleware: RabbitMQMiddleware,
+) -> Vec<std::thread::JoinHandle<()>> {
+    let proxies = match BurstMiddleware::create_proxies(burst_options, rabbitmq_middleware).await {
+        Ok(p) => p,
+        Err(e) => {
+            error!("{:?}", e);
+            panic!();
+        }
+    };
 
-    let mut threads = Vec::with_capacity(handles.len());
-    for handle in handles {
+    let mut threads = Vec::with_capacity(proxies.len());
+    for (worker_id, proxy) in proxies {
         let thread = thread::spawn(move || {
-            let thread_id = handle.worker_id;
-            // println!("thread start: id={}", thread_id);
+            info!("thread start: id={}", worker_id);
             let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            let result = tokio_runtime.block_on(async { worker(handle).await.unwrap() });
-            // println!("thread end: id={}", thread_id);
+            let result = tokio_runtime.block_on(async { worker(proxy).await.unwrap() });
+            info!("thread end: id={}", worker_id);
             result
         });
         threads.push(thread);
@@ -60,10 +85,8 @@ async fn group(burst_args: MiddlewareArguments) -> Vec<std::thread::JoinHandle<(
 
     return threads;
 }
-pub async fn worker(
-    mut burst_middleware: BurstMiddleware,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if burst_middleware.worker_id == 0 {
+pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std::error::Error>> {
+    if burst_middleware.info().worker_id == 0 {
         let mut count = 0;
         loop {
             let msg = burst_middleware.recv().await.unwrap();
@@ -78,7 +101,8 @@ pub async fn worker(
         }
         println!(
             "worker {} received a total of {} messages",
-            burst_middleware.worker_id, count
+            burst_middleware.info().worker_id,
+            count
         );
     } else {
         for i in 0..REPEAT {
@@ -86,12 +110,16 @@ pub async fn worker(
             //     "[worker {}] sending message {}...",
             //     burst_middleware.worker_id, i
             // );
-            let message = format!("hello #{} from worker {}", i, burst_middleware.worker_id);
+            let message = format!(
+                "hello #{} from worker {}",
+                i,
+                burst_middleware.info().worker_id
+            );
             let payload = Bytes::from(message);
             sleep(Duration::from_secs(1)).await;
             burst_middleware.send(0, payload).await.unwrap();
         }
     }
-    println!("worker {} finished", burst_middleware.worker_id);
+    println!("worker {} finished", burst_middleware.info().worker_id);
     Ok(())
 }
