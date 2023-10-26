@@ -3,7 +3,10 @@ use burst_communication_middleware::{
 };
 use bytes::Bytes;
 use log::{error, info};
-use std::thread;
+use std::{
+    collections::{HashMap, HashSet},
+    thread,
+};
 
 const BURST_SIZE: u32 = 64;
 const GROUPS: u32 = 4;
@@ -18,14 +21,22 @@ async fn main() {
 
     let group_size = BURST_SIZE / GROUPS;
 
+    let group_ranges = (0..GROUPS)
+        .map(|group_id| {
+            (
+                group_id.to_string(),
+                ((group_size * group_id)..((group_size * group_id) + group_size)).collect(),
+            )
+        })
+        .collect::<HashMap<String, HashSet<u32>>>();
+
     let mut threads = Vec::with_capacity(BURST_SIZE as usize);
     for group_id in 0..GROUPS {
         let burst_options = BurstOptions::new(
             "broadcast".to_string(),
-            0..BURST_SIZE,
-            (group_size * group_id)..((group_size * group_id) + group_size),
-            0..GROUPS,
-            group_id,
+            BURST_SIZE,
+            group_ranges.clone(),
+            group_id.to_string(),
         )
         .broadcast_channel_size(256)
         .build();
@@ -84,9 +95,7 @@ async fn group(
     return threads;
 }
 
-pub async fn worker(
-    burst_middleware: BurstMiddleware,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std::error::Error>> {
     let res: Message;
     if burst_middleware.info().worker_id == 0 {
         let msg = "hello world";

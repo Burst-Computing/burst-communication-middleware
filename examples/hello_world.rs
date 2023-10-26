@@ -3,18 +3,23 @@ use burst_communication_middleware::{
 };
 use bytes::Bytes;
 use log::{error, info};
-use std::thread;
-use tracing_subscriber::{
-    fmt, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter,
+use std::{
+    collections::{HashMap, HashSet},
+    thread,
 };
 
 #[tokio::main]
 async fn main() {
     env_logger::init();
 
-    let burst_options = BurstOptions::new("hello_world".to_string(), 0..2, 0..2, 0..1, 0)
-        .broadcast_channel_size(256)
-        .build();
+    let group_ranges = vec![(0.to_string(), vec![0, 1].into_iter().collect())]
+        .into_iter()
+        .collect::<HashMap<String, HashSet<u32>>>();
+
+    let burst_options =
+        BurstOptions::new("hello_world".to_string(), 2, group_ranges, 0.to_string())
+            .broadcast_channel_size(256)
+            .build();
 
     let rabbitmq_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
         .durable_queues(true)

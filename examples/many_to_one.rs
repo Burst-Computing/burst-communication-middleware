@@ -2,9 +2,11 @@ use burst_communication_middleware::{
     BurstMiddleware, BurstOptions, RabbitMQMiddleware, RabbitMQOptions,
 };
 use bytes::Bytes;
-use env_logger;
 use log::{error, info};
-use std::thread;
+use std::{
+    collections::{HashMap, HashSet},
+    thread,
+};
 use tokio::time::{sleep, Duration};
 
 const REPEAT: u32 = 3;
@@ -21,19 +23,27 @@ async fn main() {
 
     let group_size = BURST_SIZE / GROUPS;
 
+    let group_ranges = (0..GROUPS)
+        .map(|group_id| {
+            (
+                group_id.to_string(),
+                ((group_size * group_id)..((group_size * group_id) + group_size)).collect(),
+            )
+        })
+        .collect::<HashMap<String, HashSet<u32>>>();
+
     let mut threads = Vec::with_capacity(BURST_SIZE as usize);
     for group_id in 0..GROUPS {
         let burst_options = BurstOptions::new(
-            "broadcast".to_string(),
-            0..BURST_SIZE,
-            (group_size * group_id)..((group_size * group_id) + group_size),
-            0..GROUPS,
-            group_id,
+            "many_to_one".to_string(),
+            BURST_SIZE,
+            group_ranges.clone(),
+            group_id.to_string(),
         )
         .broadcast_channel_size(256)
         .build();
         let rabbitmq_options =
-            RabbitMQOptions::new("amqp://rabbit:123456@localhost:5672".to_string())
+            RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
                 .durable_queues(true)
                 .ack(true)
                 .build();
@@ -90,26 +100,28 @@ pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std
         let mut count = 0;
         loop {
             let msg = burst_middleware.recv().await.unwrap();
-            // println!(
-            //     "worker {} received message: {:?}",
-            //     burst_middleware.worker_id, msg
-            // );
+            info!(
+                "worker {} received message: {:?}",
+                burst_middleware.info().worker_id,
+                msg
+            );
             count += 1;
             if count == REPEAT * (BURST_SIZE - 1) {
                 break;
             }
         }
-        println!(
+        info!(
             "worker {} received a total of {} messages",
             burst_middleware.info().worker_id,
             count
         );
     } else {
         for i in 0..REPEAT {
-            // println!(
-            //     "[worker {}] sending message {}...",
-            //     burst_middleware.worker_id, i
-            // );
+            info!(
+                "[worker {}] sending message {}...",
+                burst_middleware.info().worker_id,
+                i
+            );
             let message = format!(
                 "hello #{} from worker {}",
                 i,
@@ -117,9 +129,15 @@ pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std
             );
             let payload = Bytes::from(message);
             sleep(Duration::from_secs(1)).await;
-            burst_middleware.send(0, payload).await.unwrap();
+            match burst_middleware.send(0, payload).await {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("{:?}", e);
+                    panic!();
+                }
+            };
         }
     }
-    println!("worker {} finished", burst_middleware.info().worker_id);
+    info!("worker {} finished", burst_middleware.info().worker_id);
     Ok(())
 }

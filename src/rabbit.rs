@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 
@@ -86,6 +89,7 @@ pub struct RabbitMQMiddleware {
     burst_options: BurstOptions,
     rabbitmq_options: RabbitMQOptions,
     connection: Arc<Connection>,
+    group: HashSet<u32>,
 }
 
 #[async_trait]
@@ -95,17 +99,15 @@ impl SendReceiveFactory for RabbitMQMiddleware {
 
         let mut hmap = HashMap::new();
 
-        futures::future::try_join_all(self.burst_options.local_range.clone().map(
-            |worker_id| async move {
-                RabbitMQProxy::new(
-                    self.connection.clone(),
-                    self.rabbitmq_options.clone(),
-                    self.burst_options.clone(),
-                    worker_id,
-                )
-                .await
-            },
-        ))
+        futures::future::try_join_all(self.group.iter().map(|worker_id| async move {
+            RabbitMQProxy::new(
+                self.connection.clone(),
+                self.rabbitmq_options.clone(),
+                self.burst_options.clone(),
+                *worker_id,
+            )
+            .await
+        }))
         .await?
         .into_iter()
         .for_each(|proxy| {
@@ -127,9 +129,14 @@ impl RabbitMQMiddleware {
         let connection =
             Connection::connect(&rabbitmq_options.rabbitmq_uri, Default::default()).await?;
         Ok(Self {
-            burst_options,
             rabbitmq_options,
             connection: Arc::new(connection),
+            group: burst_options
+                .group_ranges
+                .get(&burst_options.group_id)
+                .unwrap()
+                .clone(),
+            burst_options,
         })
     }
 
@@ -158,69 +165,93 @@ impl RabbitMQMiddleware {
         let mut options = ExchangeDeclareOptions::default();
         options.durable = self.rabbitmq_options.durable_exchanges;
 
-        futures::future::try_join_all(self.burst_options.broadcast_range.clone().map(|id| {
-            channel.exchange_declare(
-                get_broadcast_exchange_name(
-                    &self.rabbitmq_options.broadcast_exchange_prefix,
-                    &self.burst_options.burst_id,
-                    id,
-                )
-                .leak(),
-                ExchangeKind::Fanout,
-                options,
-                FieldTable::default(),
-            )
-        }))
+        futures::future::try_join_all(
+            self.burst_options
+                .group_ranges
+                .keys()
+                .map(|id| {
+                    channel.exchange_declare(
+                        get_broadcast_exchange_name(
+                            &self.rabbitmq_options.broadcast_exchange_prefix,
+                            &self.burst_options.burst_id,
+                            id,
+                        )
+                        .leak(),
+                        ExchangeKind::Fanout,
+                        options,
+                        FieldTable::default(),
+                    )
+                })
+                .chain(std::iter::once(
+                    channel.exchange_declare(
+                        get_broadcast_exchange_name(
+                            &self.rabbitmq_options.broadcast_exchange_prefix,
+                            &self.burst_options.burst_id,
+                            &self.burst_options.group_id,
+                        )
+                        .leak(),
+                        ExchangeKind::Fanout,
+                        options,
+                        FieldTable::default(),
+                    ),
+                )),
+        )
         .await?;
 
-        // Declare all queues
+        // Declare all queues and bind them to the direct exchange
         let mut options = QueueDeclareOptions::default();
         options.durable = self.rabbitmq_options.durable_queues;
 
-        let mut local_queues = HashMap::new();
+        let ch = Arc::new(channel.clone());
+        let exchange = Arc::new(direct_exchange.clone());
 
-        let queues =
-            futures::future::try_join_all(self.burst_options.global_range.clone().map(|id| {
-                let queue_name = get_queue_name(
-                    &self.rabbitmq_options.queue_prefix,
-                    &self.burst_options.burst_id,
-                    id,
-                );
-                if self.burst_options.local_range.contains(&id) {
-                    local_queues.insert(id, queue_name.clone());
+        futures::future::try_join_all(self.burst_options.group_ranges.iter().map(
+            move |(group_id, worker_ids)| {
+                let ch = ch.clone();
+                let exchange = exchange.clone();
+                async move {
+                    futures::future::try_join_all(worker_ids.iter().map(move |id| {
+                        let ch = ch.clone();
+                        let exchange = exchange.clone();
+                        async move {
+                            let queue_name = get_queue_name(
+                                &self.rabbitmq_options.queue_prefix,
+                                &self.burst_options.burst_id,
+                                *id,
+                            );
+                            let q = ch
+                                .queue_declare(queue_name.leak(), options, FieldTable::default())
+                                .await?;
+                            // Bind queue to direct exchange
+                            ch.queue_bind(
+                                q.name().as_str(),
+                                &exchange,
+                                q.name().as_str(),
+                                QueueBindOptions::default(),
+                                FieldTable::default(),
+                            )
+                            .await?;
+                            // Bind queue to its corresponding broadcast exchange
+                            ch.queue_bind(
+                                q.name().as_str(),
+                                &get_broadcast_exchange_name(
+                                    &self.rabbitmq_options.broadcast_exchange_prefix,
+                                    &self.burst_options.burst_id,
+                                    group_id,
+                                ),
+                                q.name().as_str(),
+                                QueueBindOptions::default(),
+                                FieldTable::default(),
+                            )
+                            .await?;
+                            Ok::<_, lapin::Error>(())
+                        }
+                    }))
+                    .await?;
+                    Ok::<_, lapin::Error>(())
                 }
-                channel.queue_declare(queue_name.leak(), options, FieldTable::default())
-            }))
-            .await?;
-
-        // Bind queues to exchange
-        futures::future::try_join_all(queues.iter().map(|queue| {
-            channel.queue_bind(
-                queue.name().as_str(),
-                &direct_exchange,
-                queue.name().as_str(),
-                QueueBindOptions::default(),
-                FieldTable::default(),
-            )
-        }))
-        .await?;
-
-        // Bind local queues to this group's broadcast exchange
-        let broadcast_exchange = get_broadcast_exchange_name(
-            &self.rabbitmq_options.broadcast_exchange_prefix,
-            &self.burst_options.burst_id,
-            self.burst_options.group_id,
-        );
-
-        futures::future::try_join_all(local_queues.values().map(|queue| {
-            channel.queue_bind(
-                queue,
-                &broadcast_exchange,
-                queue,
-                QueueBindOptions::default(),
-                FieldTable::default(),
-            )
-        }))
+            },
+        ))
         .await?;
 
         channel.close(200, "Bye").await?;
@@ -242,13 +273,13 @@ pub struct RabbitMQSendProxy {
     channel: Channel,
     rabbitmq_options: RabbitMQOptions,
     burst_options: BurstOptions,
-    worker_id: u32,
 }
 
 pub struct RabbitMQReceiveProxy {
     channel: Channel,
     options: RabbitMQOptions,
     consumer: Consumer,
+    worker_id: u32,
 }
 
 #[async_trait]
@@ -259,15 +290,14 @@ impl SendReceiveProxy for RabbitMQProxy {
         } else {
             futures::future::try_join_all(
                 self.burst_options
-                    .broadcast_range
-                    .clone()
-                    .filter(|&dest| dest != self.burst_options.group_id)
+                    .group_ranges
+                    .keys()
+                    .filter(|dest| **dest != self.burst_options.group_id)
                     .map(|dest| {
-                        send_rabbit(
+                        send_broadcast(
                             &self.channel,
                             msg,
                             dest,
-                            true,
                             &self.rabbitmq_options,
                             &self.burst_options,
                         )
@@ -314,7 +344,6 @@ impl RabbitMQProxy {
                     connection.clone(),
                     rabbitmq_options.clone(),
                     burst_options.clone(),
-                    worker_id,
                 )
                 .await?,
             ),
@@ -337,16 +366,14 @@ impl SendProxy for RabbitMQSendProxy {
         if msg.collective == CollectiveType::Broadcast {
             Err("Cannot send broadcast message to a single destination".into())
         } else {
-            send_rabbit(
+            send_direct(
                 &self.channel,
                 msg,
                 dest,
-                false,
                 &self.rabbitmq_options,
                 &self.burst_options,
             )
-            .await?;
-            Ok(())
+            .await
         }
     }
 }
@@ -356,14 +383,12 @@ impl RabbitMQSendProxy {
         connection: Arc<Connection>,
         rabbitmq_options: RabbitMQOptions,
         burst_options: BurstOptions,
-        worker_id: u32,
     ) -> Result<Self> {
         let channel = connection.create_channel().await?;
         Ok(Self {
             channel,
             rabbitmq_options,
             burst_options,
-            worker_id,
         })
     }
 }
@@ -408,17 +433,59 @@ impl RabbitMQReceiveProxy {
             channel,
             options: rabbitmq_options,
             consumer,
+            worker_id,
         })
     }
+}
+
+async fn send_direct(
+    channel: &Channel,
+    msg: &Message,
+    dest: u32,
+    rabbitmq_options: &RabbitMQOptions,
+    burst_options: &BurstOptions,
+) -> Result<()> {
+    send_rabbit(
+        channel,
+        msg,
+        &get_direct_exchange_name(
+            &rabbitmq_options.direct_exchange_prefix,
+            &burst_options.burst_id,
+        ),
+        &get_queue_name(
+            &rabbitmq_options.queue_prefix,
+            &burst_options.burst_id,
+            dest,
+        ),
+    )
+    .await
+}
+
+async fn send_broadcast(
+    channel: &Channel,
+    msg: &Message,
+    dest: &String,
+    rabbitmq_options: &RabbitMQOptions,
+    burst_options: &BurstOptions,
+) -> Result<()> {
+    send_rabbit(
+        channel,
+        msg,
+        &get_broadcast_exchange_name(
+            &rabbitmq_options.broadcast_exchange_prefix,
+            &burst_options.burst_id,
+            dest,
+        ),
+        "",
+    )
+    .await
 }
 
 async fn send_rabbit(
     channel: &Channel,
     msg: &Message,
-    dest: u32,
-    broadcast: bool,
-    rabbitmq_options: &RabbitMQOptions,
-    burst_options: &BurstOptions,
+    exchange: &str,
+    routing_key: &str,
 ) -> Result<()> {
     let mut fields = FieldTable::default();
     fields.insert("sender_id".into(), AMQPValue::LongUInt(msg.sender_id));
@@ -432,33 +499,10 @@ async fn send_rabbit(
         AMQPValue::LongUInt(msg.collective as u32),
     );
 
-    let (exchange, routing_key) = if broadcast {
-        (
-            get_broadcast_exchange_name(
-                &rabbitmq_options.broadcast_exchange_prefix,
-                &burst_options.burst_id,
-                dest,
-            ),
-            "".into(),
-        )
-    } else {
-        (
-            get_direct_exchange_name(
-                &rabbitmq_options.direct_exchange_prefix,
-                &burst_options.burst_id,
-            ),
-            get_queue_name(
-                &rabbitmq_options.queue_prefix,
-                &burst_options.burst_id,
-                dest,
-            ),
-        )
-    };
-
     channel
         .basic_publish(
-            &exchange,
-            &routing_key,
+            exchange,
+            routing_key,
             BasicPublishOptions::default(),
             &msg.data,
             BasicProperties::default().with_headers(fields),
@@ -471,7 +515,7 @@ fn get_direct_exchange_name(prefix: &str, burst_id: &str) -> String {
     format!("{}_{}", prefix, burst_id)
 }
 
-fn get_broadcast_exchange_name(prefix: &str, burst_id: &str, group_id: u32) -> String {
+fn get_broadcast_exchange_name(prefix: &str, burst_id: &str, group_id: &str) -> String {
     format!("{}_{}_group_{}", prefix, burst_id, group_id)
 }
 

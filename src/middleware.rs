@@ -1,4 +1,7 @@
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -38,35 +41,31 @@ pub trait SendReceiveFactory: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct BurstOptions {
     pub burst_id: String,
-    pub global_range: Range<u32>,
-    pub local_range: Range<u32>,
-    pub broadcast_range: Range<u32>,
-    pub group_id: u32,
+    pub burst_size: u32,
+    pub group_ranges: HashMap<String, HashSet<u32>>,
+    pub group_id: String,
     pub broadcast_channel_size: usize,
 }
 
 pub struct BurstInfo {
     pub burst_id: String,
-    pub global_range: Range<u32>,
-    pub local_range: Range<u32>,
-    pub broadcast_range: Range<u32>,
+    pub burst_size: u32,
+    pub group_ranges: HashMap<String, HashSet<u32>>,
     pub worker_id: u32,
-    pub group_id: u32,
+    pub group_id: String,
 }
 
 impl BurstOptions {
     pub fn new(
         burst_id: String,
-        global_range: Range<u32>,
-        local_range: Range<u32>,
-        broadcast_range: Range<u32>,
-        group_id: u32,
+        burst_size: u32,
+        group_ranges: HashMap<String, HashSet<u32>>,
+        group_id: String,
     ) -> Self {
         Self {
             burst_id,
-            global_range,
-            local_range,
-            broadcast_range,
+            burst_size,
+            group_ranges,
             group_id,
             broadcast_channel_size: DEFAULT_BROADCAST_CHANNEL_SIZE,
         }
@@ -85,6 +84,7 @@ pub struct BurstMiddleware {
     options: BurstOptions,
 
     worker_id: u32,
+    group: HashSet<u32>,
 
     local_channel_tx: Arc<HashMap<u32, UnboundedSender<Message>>>,
     local_channel_rx: Mutex<UnboundedReceiver<Message>>,
@@ -104,14 +104,16 @@ impl BurstMiddleware {
         options: BurstOptions,
         implementation: impl SendReceiveFactory,
     ) -> Result<HashMap<u32, BurstMiddleware>> {
+        let current_group = options.group_ranges.get(&options.group_id).unwrap();
+
         // create local channels
         let mut local_channel_tx = HashMap::new();
         let mut local_channel_rx = HashMap::new();
 
-        for id in options.local_range.clone() {
+        for id in current_group {
             let (tx, rx) = mpsc::unbounded_channel::<Message>();
-            local_channel_tx.insert(id, tx);
-            local_channel_rx.insert(id, rx);
+            local_channel_tx.insert(*id, tx);
+            local_channel_rx.insert(*id, rx);
         }
 
         // create broadcast channel for this group
@@ -119,8 +121,8 @@ impl BurstMiddleware {
         let mut broadcast_channel_rx = HashMap::new();
 
         // subscribe to all broadcast channels for each thread
-        options.local_range.clone().for_each(|id| {
-            broadcast_channel_rx.insert(id, tx.subscribe());
+        current_group.iter().for_each(|id| {
+            broadcast_channel_rx.insert(*id, tx.subscribe());
         });
 
         let mut proxies = HashMap::new();
@@ -137,6 +139,7 @@ impl BurstMiddleware {
                 tx.clone(),
                 broadcast_channel_rx.remove(&id).unwrap(),
                 id,
+                current_group.clone(),
             );
             proxies.insert(id, proxy);
         }
@@ -152,6 +155,7 @@ impl BurstMiddleware {
         broadcast_channel_tx: Sender<Message>,
         broadcast_channel_rx: Receiver<Message>,
         worker_id: u32,
+        current_group: HashSet<u32>,
     ) -> BurstMiddleware {
         // create counters
         let mut counters = HashMap::new();
@@ -166,6 +170,7 @@ impl BurstMiddleware {
         Self {
             options,
             worker_id,
+            group: current_group,
             local_channel_tx,
             local_channel_rx: Mutex::new(local_channel_rx),
             broadcast_channel_tx,
@@ -266,22 +271,19 @@ impl BurstMiddleware {
                 .get_all_messages_collective(&CollectiveType::Gather)
                 .await;
 
-            let local_remaining = self.options.local_range.len()
+            let local_remaining = self.options.group_ranges.len()
                 - messages
                     .iter()
-                    .filter(|x| self.options.local_range.contains(&x.sender_id))
+                    .filter(|x| self.group.contains(&x.sender_id))
                     .count()
                 - 1;
 
-            let remote_remaining = self.options.global_range.len()
+            let remote_remaining = self.options.burst_size as usize
                 - messages
                     .iter()
-                    .filter(|x| {
-                        self.options.global_range.contains(&x.sender_id)
-                            && !self.options.local_range.contains(&x.sender_id)
-                    })
+                    .filter(|x| !self.group.contains(&x.sender_id))
                     .count()
-                - self.options.local_range.len();
+                - self.options.group_ranges.len();
 
             let msgs = self
                 .receive_multiple_messages(local_remaining, remote_remaining, false, |msg| {
@@ -310,11 +312,10 @@ impl BurstMiddleware {
     pub fn info(&self) -> BurstInfo {
         BurstInfo {
             burst_id: self.options.burst_id.clone(),
-            global_range: self.options.global_range.clone(),
-            local_range: self.options.local_range.clone(),
-            broadcast_range: self.options.broadcast_range.clone(),
+            burst_size: self.options.burst_size,
+            group_ranges: self.options.group_ranges.clone(),
             worker_id: self.worker_id,
-            group_id: self.options.group_id,
+            group_id: self.options.group_id.clone(),
         }
     }
 
@@ -328,7 +329,7 @@ impl BurstMiddleware {
         let chunk_id = 0;
         let last_chunk = true;
 
-        if !self.options.global_range.contains(&dest) {
+        if dest >= self.options.burst_size {
             return Err("worker with id {} does not exist".into());
         }
 
@@ -341,7 +342,7 @@ impl BurstMiddleware {
             data,
         };
 
-        if self.options.local_range.contains(&dest) {
+        if self.group.contains(&dest) {
             if let Some(tx) = self.local_channel_tx.get(&dest) {
                 tx.send(msg)?;
             } else {
