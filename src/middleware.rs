@@ -98,6 +98,7 @@ pub struct BurstMiddleware {
     broadcast_channel_tx: Sender<Message>,
     broadcast_channel_rx: Mutex<Receiver<Message>>,
 
+    local_send_receive: Box<dyn SendReceiveProxy>,
     remote_send_receive: Box<dyn SendReceiveProxy>,
 
     counters: HashMap<CollectiveType, AtomicU32>,

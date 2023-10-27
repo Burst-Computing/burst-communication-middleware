@@ -82,10 +82,10 @@ impl Default for RabbitMQOptions {
     }
 }
 
-pub struct RabbitMQMiddleware;
+pub struct RabbitMQMImpl;
 
 #[async_trait]
-impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMiddleware {
+impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
     async fn create_remote_proxies(
         burst_options: Arc<BurstOptions>,
         rabbitmq_options: RabbitMQOptions,
@@ -321,7 +321,7 @@ impl RabbitMQProxy {
         rabbitmq_options: Arc<RabbitMQOptions>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
-    ) -> Result<RabbitMQProxy> {
+    ) -> Result<Self> {
         let channel = connection.create_channel().await?;
 
         Ok(Self {

@@ -1,5 +1,5 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, Message, RabbitMQMiddleware, RabbitMQOptions,
+    BurstMiddleware, BurstOptions, Message, RabbitMQMImpl, RabbitMQOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -60,18 +60,16 @@ async fn group(
     burst_options: BurstOptions,
     rabbitmq_options: RabbitMQOptions,
 ) -> Vec<std::thread::JoinHandle<()>> {
-    let proxies = match BurstMiddleware::create_proxies::<RabbitMQMiddleware, _>(
-        burst_options,
-        rabbitmq_options,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            error!("{:?}", e);
-            panic!();
-        }
-    };
+    let proxies =
+        match BurstMiddleware::create_proxies::<RabbitMQMImpl, _>(burst_options, rabbitmq_options)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                error!("{:?}", e);
+                panic!();
+            }
+        };
 
     let mut threads = Vec::with_capacity(proxies.len());
     for (worker_id, proxy) in proxies {

@@ -1,5 +1,5 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, RabbitMQMiddleware, RabbitMQOptions,
+    BurstMiddleware, BurstOptions, RabbitMQMImpl, RabbitMQOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -16,7 +16,7 @@ async fn main() {
         .into_iter()
         .collect::<HashMap<String, HashSet<u32>>>();
 
-    let mut proxies = match BurstMiddleware::create_proxies::<RabbitMQMiddleware, _>(
+    let mut proxies = match BurstMiddleware::create_proxies::<RabbitMQMImpl, _>(
         BurstOptions::new("hello_world".to_string(), 2, group_ranges, 0.to_string())
             .broadcast_channel_size(256)
             .build(),
