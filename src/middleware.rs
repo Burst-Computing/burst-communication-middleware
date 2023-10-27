@@ -37,8 +37,11 @@ pub trait ReceiveProxy: Send + Sync {
 }
 
 #[async_trait]
-pub trait SendReceiveFactory: Send + Sync {
-    async fn create_remote_proxies(&self) -> Result<HashMap<u32, Box<dyn SendReceiveProxy>>>;
+pub trait SendReceiveFactory<T>: Send + Sync {
+    async fn create_remote_proxies(
+        burst_options: Arc<BurstOptions>,
+        options: T,
+    ) -> Result<HashMap<u32, Box<dyn SendReceiveProxy>>>;
 }
 
 #[derive(Clone, Debug)]
@@ -84,7 +87,7 @@ impl BurstOptions {
 }
 
 pub struct BurstMiddleware {
-    options: BurstOptions,
+    options: Arc<BurstOptions>,
 
     worker_id: u32,
     group: HashSet<u32>,
@@ -103,10 +106,15 @@ pub struct BurstMiddleware {
 }
 
 impl BurstMiddleware {
-    pub async fn create_proxies(
+    pub async fn create_proxies<I, O>(
         options: BurstOptions,
-        implementation: impl SendReceiveFactory,
-    ) -> Result<HashMap<u32, BurstMiddleware>> {
+        impl_options: O,
+    ) -> Result<HashMap<u32, Self>>
+    where
+        I: SendReceiveFactory<O>,
+        O: Send + Sync,
+    {
+        let options = Arc::new(options);
         let current_group = options.group_ranges.get(&options.group_id).unwrap();
 
         // create local channels
@@ -129,7 +137,7 @@ impl BurstMiddleware {
         });
 
         let mut proxies = HashMap::new();
-        let remote_proxies = implementation.create_remote_proxies().await?;
+        let remote_proxies = I::create_remote_proxies(options.clone(), impl_options).await?;
 
         let local_channel_tx = Arc::new(local_channel_tx);
 
@@ -151,7 +159,7 @@ impl BurstMiddleware {
     }
 
     pub fn new(
-        options: BurstOptions,
+        options: Arc<BurstOptions>,
         remote_proxy: Box<dyn SendReceiveProxy>,
         local_channel_tx: Arc<HashMap<u32, UnboundedSender<Message>>>,
         local_channel_rx: UnboundedReceiver<Message>,
@@ -159,7 +167,7 @@ impl BurstMiddleware {
         broadcast_channel_rx: Receiver<Message>,
         worker_id: u32,
         group: HashSet<u32>,
-    ) -> BurstMiddleware {
+    ) -> Self {
         // create counters
         let mut counters = HashMap::new();
         for collective in &[

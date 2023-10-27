@@ -8,13 +8,13 @@ edition = "2021"
 [dependencies]
 async-trait = "0.1.74"
 bytes = "1.5.0"
-futures = "0.3.28"
+futures = "0.3.29"
 lapin = "2.3.1"
 log = "0.4.20"
 tokio = { version = "1.33.0", features = ["full"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
-env_logger = "0.9.0"
+env_logger = "0.9.3"
 uuid = { version = "1.5.0", features = ["v4"] }
 
 [[example]]

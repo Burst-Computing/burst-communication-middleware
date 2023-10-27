@@ -16,33 +16,23 @@ async fn main() {
         .into_iter()
         .collect::<HashMap<String, HashSet<u32>>>();
 
-    let burst_options =
+    let mut proxies = match BurstMiddleware::create_proxies::<RabbitMQMiddleware, _>(
         BurstOptions::new("hello_world".to_string(), 2, group_ranges, 0.to_string())
             .broadcast_channel_size(256)
-            .build();
-
-    let rabbitmq_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-        .durable_queues(true)
-        .ack(true)
-        .build();
-
-    let rabbitmq_middleware =
-        match RabbitMQMiddleware::new(burst_options.clone(), rabbitmq_options).await {
-            Ok(m) => m,
-            Err(e) => {
-                error!("{:?}", e);
-                panic!();
-            }
-        };
-
-    let mut proxies =
-        match BurstMiddleware::create_proxies(burst_options, rabbitmq_middleware).await {
-            Ok(p) => p,
-            Err(e) => {
-                error!("{:?}", e);
-                panic!();
-            }
-        };
+            .build(),
+        RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+            .durable_queues(true)
+            .ack(true)
+            .build(),
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            error!("{:?}", e);
+            panic!();
+        }
+    };
 
     let p1 = proxies.remove(&0).unwrap();
     let p2 = proxies.remove(&1).unwrap();

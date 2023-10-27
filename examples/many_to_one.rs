@@ -48,16 +48,7 @@ async fn main() {
                 .ack(true)
                 .build();
 
-        let rabbitmq_middleware =
-            match RabbitMQMiddleware::new(burst_options.clone(), rabbitmq_options).await {
-                Ok(m) => m,
-                Err(e) => {
-                    error!("{:?}", e);
-                    panic!();
-                }
-            };
-
-        let group_threads = group(burst_options, rabbitmq_middleware).await;
+        let group_threads = group(burst_options, rabbitmq_options).await;
         threads.extend(group_threads);
     }
 
@@ -66,11 +57,16 @@ async fn main() {
     }
 }
 
-async fn group(
+async fn group<'a>(
     burst_options: BurstOptions,
-    rabbitmq_middleware: RabbitMQMiddleware,
+    rabbitmq_options: RabbitMQOptions,
 ) -> Vec<std::thread::JoinHandle<()>> {
-    let proxies = match BurstMiddleware::create_proxies(burst_options, rabbitmq_middleware).await {
+    let proxies = match BurstMiddleware::create_proxies::<RabbitMQMiddleware, _>(
+        burst_options,
+        rabbitmq_options,
+    )
+    .await
+    {
         Ok(p) => p,
         Err(e) => {
             error!("{:?}", e);
