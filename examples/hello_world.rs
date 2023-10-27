@@ -41,24 +41,26 @@ async fn main() {
     let p2 = proxies.remove(&1).unwrap();
 
     let thread_1 = thread::spawn(move || {
-        info!("thread start: id={}", 0);
+        let worker_id = p1.info().worker_id;
+        info!("thread start: id={}", worker_id);
         let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap();
         let result = tokio_runtime.block_on(async { worker(p1).await.unwrap() });
-        // println!("thread end: id={}", handle.worker_id);
+        info!("thread end: id={}", worker_id);
         result
     });
 
     let thread_2 = thread::spawn(move || {
-        info!("thread start: id={}", 0);
+        let worker_id = p2.info().worker_id;
+        info!("thread start: id={}", worker_id);
         let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap();
         let result = tokio_runtime.block_on(async { worker(p2).await.unwrap() });
-        // println!("thread end: id={}", handle.worker_id);
+        info!("thread end: id={}", worker_id);
         result
     });
 
@@ -67,9 +69,9 @@ async fn main() {
 }
 
 pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std::error::Error>> {
-    println!("hi im worker 1: id={}", burst_middleware.info().worker_id);
+    info!("hi im worker 1: id={}", burst_middleware.info().worker_id);
     if burst_middleware.info().worker_id == 0 {
-        println!(
+        info!(
             "worker {} sending message",
             burst_middleware.info().worker_id
         );
@@ -78,14 +80,14 @@ pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std
         burst_middleware.send(1, payload).await.unwrap();
 
         let response = burst_middleware.recv().await.unwrap();
-        println!(
+        info!(
             "worker {} received message: {:?}",
             burst_middleware.info().worker_id,
             response
         );
     } else {
         let message = burst_middleware.recv().await.unwrap();
-        println!(
+        info!(
             "worker {} received message: {:?}",
             burst_middleware.info().worker_id,
             message
