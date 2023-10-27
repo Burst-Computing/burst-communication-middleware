@@ -8,16 +8,9 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::sync::{
-    mpsc::{self, UnboundedReceiver, UnboundedSender},
-    Mutex, RwLock,
-};
+use tokio::sync::RwLock;
 
-use tokio::sync::broadcast::{Receiver, Sender};
-
-use crate::{impl_chainable_setter, CollectiveType, Error, Message, Result};
-
-const DEFAULT_BROADCAST_CHANNEL_SIZE: usize = 1024 * 1024;
+use crate::{CollectiveType, Error, Message, Result};
 
 const ROOT_ID: u32 = 0;
 
@@ -50,7 +43,6 @@ pub struct BurstOptions {
     pub burst_size: u32,
     pub group_ranges: HashMap<String, HashSet<u32>>,
     pub group_id: String,
-    pub broadcast_channel_size: usize,
 }
 
 pub struct BurstInfo<'a> {
@@ -73,16 +65,7 @@ impl BurstOptions {
             burst_size,
             group_ranges,
             group_id,
-            broadcast_channel_size: DEFAULT_BROADCAST_CHANNEL_SIZE,
         }
-    }
-
-    impl_chainable_setter! {
-        broadcast_channel_size, usize
-    }
-
-    pub fn build(&self) -> Self {
-        self.clone()
     }
 }
 
@@ -91,12 +74,6 @@ pub struct BurstMiddleware {
 
     worker_id: u32,
     group: HashSet<u32>,
-
-    local_channel_tx: Arc<HashMap<u32, UnboundedSender<Message>>>,
-    local_channel_rx: Mutex<UnboundedReceiver<Message>>,
-
-    broadcast_channel_tx: Sender<Message>,
-    broadcast_channel_rx: Mutex<Receiver<Message>>,
 
     local_send_receive: Box<dyn SendReceiveProxy>,
     remote_send_receive: Box<dyn SendReceiveProxy>,
@@ -107,49 +84,30 @@ pub struct BurstMiddleware {
 }
 
 impl BurstMiddleware {
-    pub async fn create_proxies<I, O>(
+    pub async fn create_proxies<LocalImpl, RemoteImpl, LocalOptions, RemoteOptions>(
         options: BurstOptions,
-        impl_options: O,
+        local_impl_options: LocalOptions,
+        remote_impl_options: RemoteOptions,
     ) -> Result<HashMap<u32, Self>>
     where
-        I: SendReceiveFactory<O>,
-        O: Send + Sync,
+        LocalImpl: SendReceiveFactory<LocalOptions>,
+        RemoteImpl: SendReceiveFactory<RemoteOptions>,
+        LocalOptions: Send + Sync,
+        RemoteOptions: Send + Sync,
     {
         let options = Arc::new(options);
         let current_group = options.group_ranges.get(&options.group_id).unwrap();
 
-        // create local channels
-        let mut local_channel_tx = HashMap::new();
-        let mut local_channel_rx = HashMap::new();
-
-        for id in current_group {
-            let (tx, rx) = mpsc::unbounded_channel::<Message>();
-            local_channel_tx.insert(*id, tx);
-            local_channel_rx.insert(*id, rx);
-        }
-
-        // create broadcast channel for this group
-        let (tx, _) = tokio::sync::broadcast::channel::<Message>(options.broadcast_channel_size);
-        let mut broadcast_channel_rx = HashMap::new();
-
-        // subscribe to all broadcast channels for each thread
-        current_group.iter().for_each(|id| {
-            broadcast_channel_rx.insert(*id, tx.subscribe());
-        });
-
         let mut proxies = HashMap::new();
-        let remote_proxies = I::create_remote_proxies(options.clone(), impl_options).await?;
+        let local_proxies = LocalImpl::create_remote_proxies(options.clone(), local_impl_options).await?;
+        let mut remote_proxies =
+            RemoteImpl::create_remote_proxies(options.clone(), remote_impl_options).await?;
 
-        let local_channel_tx = Arc::new(local_channel_tx);
-
-        for (id, proxy) in remote_proxies {
+        for (id, local_proxy) in local_proxies {
             let proxy = BurstMiddleware::new(
                 options.clone(),
-                proxy,
-                local_channel_tx.clone(),
-                local_channel_rx.remove(&id).unwrap(),
-                tx.clone(),
-                broadcast_channel_rx.remove(&id).unwrap(),
+                local_proxy,
+                remote_proxies.remove(&id).unwrap(),
                 id,
                 current_group.clone(),
             );
@@ -161,11 +119,8 @@ impl BurstMiddleware {
 
     pub fn new(
         options: Arc<BurstOptions>,
+        local_proxy: Box<dyn SendReceiveProxy>,
         remote_proxy: Box<dyn SendReceiveProxy>,
-        local_channel_tx: Arc<HashMap<u32, UnboundedSender<Message>>>,
-        local_channel_rx: UnboundedReceiver<Message>,
-        broadcast_channel_tx: Sender<Message>,
-        broadcast_channel_rx: Receiver<Message>,
         worker_id: u32,
         group: HashSet<u32>,
     ) -> Self {
@@ -183,11 +138,8 @@ impl BurstMiddleware {
             options,
             worker_id,
             group,
-            local_channel_tx,
-            local_channel_rx: Mutex::new(local_channel_rx),
-            broadcast_channel_tx,
-            broadcast_channel_rx: Mutex::new(broadcast_channel_rx),
             remote_send_receive: remote_proxy,
+            local_send_receive: local_proxy,
             counters,
             messages_buff: RwLock::new(HashMap::new()),
         }
@@ -204,14 +156,12 @@ impl BurstMiddleware {
             return Ok(msg);
         }
 
-        self.receive_message(false, |msg| msg.collective == CollectiveType::None)
+        self.receive_message(|msg| msg.collective == CollectiveType::None)
             .await
     }
 
     pub async fn broadcast(&self, data: Option<Bytes>) -> Result<Message> {
         let counter = self.get_counter(&CollectiveType::Broadcast).await;
-
-        let m;
 
         // If there is some data, broadcast it
         if let Some(data) = data {
@@ -227,18 +177,13 @@ impl BurstMiddleware {
                 data: data.clone(),
             };
 
-            self.broadcast_channel_tx.send(msg.clone())?;
-
-            self.remote_send_receive.as_ref().broadcast(&msg).await?;
-
-            // Consume self broadcast message to avoid receiving it in the next receive
-            let msgs = self
-                .receive_multiple_messages(1, 0, true, |msg| {
-                    msg.collective == CollectiveType::Broadcast && msg.counter.unwrap() == counter
-                })
-                .await?;
-            m = msgs.into_iter().next().unwrap();
-        // Otherwise, wait for broadcast message
+            match tokio::join!(
+                self.local_send_receive.broadcast(&msg),
+                self.remote_send_receive.broadcast(&msg)
+            ) {
+                (Ok(()), Ok(())) => {}
+                (Err(e), _) | (_, Err(e)) => return Err(e),
+            }
         } else {
             // If there is a message in the buffer, return it
             if let Some(msg) = self
@@ -247,14 +192,12 @@ impl BurstMiddleware {
             {
                 return Ok(msg);
             }
-
-            // Else, wait for a broadcast message
-            m = self
-                .receive_message(true, |msg| {
-                    msg.collective == CollectiveType::Broadcast && msg.counter.unwrap() == counter
-                })
-                .await?;
         }
+        let m = self
+            .receive_message(|msg| {
+                msg.collective == CollectiveType::Broadcast && msg.counter.unwrap() == counter
+            })
+            .await?;
 
         // Increment broadcast counter
         self.increment_counter(&CollectiveType::Broadcast).await;
@@ -298,7 +241,7 @@ impl BurstMiddleware {
                 - self.options.group_ranges.len();
 
             let msgs = self
-                .receive_multiple_messages(local_remaining, remote_remaining, false, |msg| {
+                .receive_multiple_messages(local_remaining, remote_remaining, |msg| {
                     msg.collective == CollectiveType::Gather && msg.counter.unwrap() == counter
                 })
                 .await?;
@@ -355,13 +298,9 @@ impl BurstMiddleware {
         };
 
         if self.group.contains(&dest) {
-            if let Some(tx) = self.local_channel_tx.get(&dest) {
-                tx.send(msg)?;
-            } else {
-                return Err("worker with id {} has no channel registered".into());
-            }
+            self.local_send_receive.send(dest, &msg).await?;
         } else {
-            self.remote_send_receive.as_ref().send(dest, &msg).await?;
+            self.remote_send_receive.send(dest, &msg).await?;
         }
         Ok(())
     }
@@ -389,7 +328,7 @@ impl BurstMiddleware {
         r
     }
 
-    async fn receive_message<P>(&self, broadcast: bool, filter: P) -> Result<Message>
+    async fn receive_message<P>(&self, filter: P) -> Result<Message>
     where
         P: Fn(&Message) -> bool,
     {
@@ -397,10 +336,7 @@ impl BurstMiddleware {
         let local = async {
             loop {
                 // receive blocking
-                let msg = match broadcast {
-                    true => self.receive_broadcast().await?,
-                    false => self.receive_local().await,
-                };
+                let msg = self.receive_local().await?;
                 if filter(&msg) {
                     return Ok::<Message, Error>(msg);
                 }
@@ -430,7 +366,6 @@ impl BurstMiddleware {
         &self,
         local: usize,
         remote: usize,
-        broadcast: bool,
         filter: P,
     ) -> Result<Vec<Message>>
     where
@@ -442,10 +377,7 @@ impl BurstMiddleware {
         let local = async {
             while local_msgs.len() < local {
                 // receive blocking
-                let msg = match broadcast {
-                    true => self.receive_broadcast().await?,
-                    false => self.receive_local().await,
-                };
+                let msg = self.receive_local().await?;
                 if filter(&msg) {
                     local_msgs.push(msg);
                 } else {
@@ -480,12 +412,8 @@ impl BurstMiddleware {
         self.remote_send_receive.recv().await
     }
 
-    async fn receive_local(&self) -> Message {
-        self.local_channel_rx.lock().await.recv().await.unwrap()
-    }
-
-    async fn receive_broadcast(&self) -> Result<Message> {
-        Ok(self.broadcast_channel_rx.lock().await.recv().await?)
+    async fn receive_local(&self) -> Result<Message> {
+        self.local_send_receive.recv().await
     }
 
     async fn save_message(&self, msg: Message) {

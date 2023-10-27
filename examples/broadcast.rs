@@ -1,5 +1,6 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, Message, RabbitMQMImpl, RabbitMQOptions,
+    BurstMiddleware, BurstOptions, Message, RabbitMQMImpl, RabbitMQOptions, TokioChannelImpl,
+    TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -37,9 +38,11 @@ async fn main() {
             BURST_SIZE,
             group_ranges.clone(),
             group_id.to_string(),
-        )
-        .broadcast_channel_size(256)
-        .build();
+        );
+
+        let channel_options = TokioChannelOptions::new()
+            .broadcast_channel_size(256)
+            .build();
 
         let rabbitmq_options =
             RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
@@ -47,7 +50,7 @@ async fn main() {
                 .ack(true)
                 .build();
 
-        let group_threads = group(burst_options, rabbitmq_options).await;
+        let group_threads = group(burst_options, channel_options, rabbitmq_options).await;
         threads.extend(group_threads);
     }
 
@@ -58,18 +61,22 @@ async fn main() {
 
 async fn group(
     burst_options: BurstOptions,
+    channel_options: TokioChannelOptions,
     rabbitmq_options: RabbitMQOptions,
 ) -> Vec<std::thread::JoinHandle<()>> {
-    let proxies =
-        match BurstMiddleware::create_proxies::<RabbitMQMImpl, _>(burst_options, rabbitmq_options)
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                error!("{:?}", e);
-                panic!();
-            }
-        };
+    let proxies = match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
+        burst_options,
+        channel_options,
+        rabbitmq_options,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            error!("{:?}", e);
+            panic!();
+        }
+    };
 
     let mut threads = Vec::with_capacity(proxies.len());
     for (worker_id, proxy) in proxies {

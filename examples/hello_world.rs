@@ -1,5 +1,6 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, RabbitMQMImpl, RabbitMQOptions,
+    BurstMiddleware, BurstOptions, RabbitMQMImpl, RabbitMQOptions, TokioChannelImpl,
+    TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -16,23 +17,25 @@ async fn main() {
         .into_iter()
         .collect::<HashMap<String, HashSet<u32>>>();
 
-    let mut proxies = match BurstMiddleware::create_proxies::<RabbitMQMImpl, _>(
-        BurstOptions::new("hello_world".to_string(), 2, group_ranges, 0.to_string())
-            .broadcast_channel_size(256)
-            .build(),
-        RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-            .durable_queues(true)
-            .ack(true)
-            .build(),
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            error!("{:?}", e);
-            panic!();
-        }
-    };
+    let mut proxies =
+        match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
+            BurstOptions::new("hello_world".to_string(), 2, group_ranges, 0.to_string()),
+            TokioChannelOptions::new()
+                .broadcast_channel_size(256)
+                .build(),
+            RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+                .durable_queues(true)
+                .ack(true)
+                .build(),
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                error!("{:?}", e);
+                panic!();
+            }
+        };
 
     let p1 = proxies.remove(&0).unwrap();
     let p2 = proxies.remove(&1).unwrap();
