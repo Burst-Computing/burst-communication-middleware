@@ -86,7 +86,7 @@ pub struct RabbitMQMImpl;
 
 #[async_trait]
 impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
-    async fn create_remote_proxies(
+    async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         rabbitmq_options: RabbitMQOptions,
     ) -> Result<HashMap<u32, Box<dyn SendReceiveProxy>>> {
@@ -195,20 +195,20 @@ async fn init_rabbit(
 
     let ch = Arc::new(channel.clone());
     let exchange = Arc::new(direct_exchange.clone());
-    let boptions = Arc::new(burst_options.clone());
-    let roptions = Arc::new(rabbitmq_options.clone());
+    let boptions = burst_options.clone();
+    let roptions = rabbitmq_options.clone();
 
     futures::future::try_join_all(burst_options.group_ranges.iter().map(
         move |(group_id, worker_ids)| {
             let ch = ch.clone();
             let exchange = exchange.clone();
-            let boptions: Arc<Arc<BurstOptions>> = boptions.clone();
+            let boptions = boptions.clone();
             let roptions = roptions.clone();
             async move {
                 futures::future::try_join_all(worker_ids.iter().map(move |id| {
                     let ch = ch.clone();
                     let exchange = exchange.clone();
-                    let boptions: Arc<Arc<BurstOptions>> = boptions.clone();
+                    let boptions = boptions.clone();
                     let roptions = roptions.clone();
                     async move {
                         let queue_name =

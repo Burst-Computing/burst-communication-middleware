@@ -47,7 +47,7 @@ pub struct TokioChannelImpl;
 
 #[async_trait]
 impl SendReceiveFactory<TokioChannelOptions> for TokioChannelImpl {
-    async fn create_remote_proxies(
+    async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         channel_options: TokioChannelOptions,
     ) -> Result<HashMap<u32, Box<dyn SendReceiveProxy>>> {

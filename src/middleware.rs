@@ -31,7 +31,7 @@ pub trait ReceiveProxy: Send + Sync {
 
 #[async_trait]
 pub trait SendReceiveFactory<T>: Send + Sync {
-    async fn create_remote_proxies(
+    async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         options: T,
     ) -> Result<HashMap<u32, Box<dyn SendReceiveProxy>>>;
@@ -69,18 +69,19 @@ impl BurstOptions {
     }
 }
 
+#[derive(Clone)]
 pub struct BurstMiddleware {
     options: Arc<BurstOptions>,
 
     worker_id: u32,
     group: HashSet<u32>,
 
-    local_send_receive: Box<dyn SendReceiveProxy>,
-    remote_send_receive: Box<dyn SendReceiveProxy>,
+    local_send_receive: Arc<dyn SendReceiveProxy>,
+    remote_send_receive: Arc<dyn SendReceiveProxy>,
 
-    counters: HashMap<CollectiveType, AtomicU32>,
+    counters: Arc<HashMap<CollectiveType, AtomicU32>>,
 
-    messages_buff: RwLock<HashMap<CollectiveType, RwLock<HashMap<u32, RwLock<Vec<Message>>>>>>,
+    messages_buff: Arc<RwLock<HashMap<CollectiveType, RwLock<HashMap<u32, RwLock<Vec<Message>>>>>>>,
 }
 
 impl BurstMiddleware {
@@ -99,9 +100,9 @@ impl BurstMiddleware {
         let current_group = options.group_ranges.get(&options.group_id).unwrap();
 
         let mut proxies = HashMap::new();
-        let local_proxies = LocalImpl::create_remote_proxies(options.clone(), local_impl_options).await?;
+        let local_proxies = LocalImpl::create_proxies(options.clone(), local_impl_options).await?;
         let mut remote_proxies =
-            RemoteImpl::create_remote_proxies(options.clone(), remote_impl_options).await?;
+            RemoteImpl::create_proxies(options.clone(), remote_impl_options).await?;
 
         for (id, local_proxy) in local_proxies {
             let proxy = BurstMiddleware::new(
@@ -138,10 +139,10 @@ impl BurstMiddleware {
             options,
             worker_id,
             group,
-            remote_send_receive: remote_proxy,
-            local_send_receive: local_proxy,
-            counters,
-            messages_buff: RwLock::new(HashMap::new()),
+            remote_send_receive: Arc::from(remote_proxy),
+            local_send_receive: Arc::from(local_proxy),
+            counters: Arc::new(counters),
+            messages_buff: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -226,7 +227,7 @@ impl BurstMiddleware {
                 .get_all_messages_collective(&CollectiveType::Gather)
                 .await;
 
-            let local_remaining = self.options.group_ranges.len()
+            let local_remaining = self.group.len()
                 - messages
                     .iter()
                     .filter(|x| self.group.contains(&x.sender_id))
@@ -238,7 +239,7 @@ impl BurstMiddleware {
                     .iter()
                     .filter(|x| !self.group.contains(&x.sender_id))
                     .count()
-                - self.options.group_ranges.len();
+                - self.group.len();
 
             let msgs = self
                 .receive_multiple_messages(local_remaining, remote_remaining, |msg| {
