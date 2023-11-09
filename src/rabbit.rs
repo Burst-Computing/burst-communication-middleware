@@ -453,7 +453,7 @@ async fn send_direct(
 async fn send_broadcast(
     channel: &Channel,
     msg: &Message,
-    dest: &String,
+    dest: &str,
     rabbitmq_options: &RabbitMQOptions,
     burst_options: &BurstOptions,
 ) -> Result<()> {
