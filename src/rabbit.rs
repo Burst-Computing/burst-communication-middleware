@@ -16,8 +16,8 @@ use lapin::{
 use uuid::Uuid;
 
 use crate::{
-    impl_chainable_setter, BurstOptions, CollectiveType, Message, ReceiveProxy, Result, SendProxy,
-    SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, Proxy,
+    ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
 };
 
 #[derive(Clone, Debug)]
@@ -26,6 +26,7 @@ pub struct RabbitMQOptions {
     pub direct_exchange_prefix: String,
     pub broadcast_exchange_prefix: String,
     pub queue_prefix: String,
+    pub broadcast_queue_prefix: String,
     pub ack: bool,
     pub durable_exchanges: bool,
     pub durable_queues: bool,
@@ -56,6 +57,10 @@ impl RabbitMQOptions {
     }
 
     impl_chainable_setter! {
+        broadcast_queue_prefix, String
+    }
+
+    impl_chainable_setter! {
         durable_exchanges, bool
     }
 
@@ -75,6 +80,7 @@ impl Default for RabbitMQOptions {
             direct_exchange_prefix: "burst_direct".into(),
             broadcast_exchange_prefix: "burst_fanout".into(),
             queue_prefix: "queue".into(),
+            broadcast_queue_prefix: "broadcast_queue".into(),
             ack: true,
             durable_exchanges: true,
             durable_queues: true,
@@ -89,7 +95,8 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         rabbitmq_options: RabbitMQOptions,
-    ) -> Result<HashMap<u32, Box<dyn SendReceiveProxy>>> {
+        broadcast_proxy: Box<dyn BroadcastSendProxy>,
+    ) -> Result<HashMap<u32, Box<dyn Proxy>>> {
         let connection = Arc::new(
             Connection::connect(&rabbitmq_options.rabbitmq_uri, Default::default()).await?,
         );
@@ -98,6 +105,7 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
             connection.clone(),
             burst_options.clone(),
             rabbitmq_options.clone(),
+            broadcast_proxy,
         )
         .await?;
 
@@ -117,10 +125,7 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
         .await?
         .into_iter()
         .for_each(|proxy| {
-            hmap.insert(
-                proxy.worker_id,
-                Box::new(proxy) as Box<dyn SendReceiveProxy>,
-            );
+            hmap.insert(proxy.worker_id, Box::new(proxy) as Box<dyn Proxy>);
         });
 
         Ok(hmap)
@@ -131,6 +136,7 @@ async fn init_rabbit(
     connection: Arc<Connection>,
     burst_options: Arc<BurstOptions>,
     rabbitmq_options: Arc<RabbitMQOptions>,
+    broadcast_proxy: Box<dyn BroadcastSendProxy>,
 ) -> Result<()> {
     let channel = connection.create_channel().await?;
 
@@ -156,37 +162,19 @@ async fn init_rabbit(
     let mut options = ExchangeDeclareOptions::default();
     options.durable = rabbitmq_options.durable_exchanges;
 
-    futures::future::try_join_all(
-        burst_options
-            .group_ranges
-            .keys()
-            .map(|id| {
-                channel.exchange_declare(
-                    get_broadcast_exchange_name(
-                        &rabbitmq_options.broadcast_exchange_prefix,
-                        &burst_options.burst_id,
-                        id,
-                    )
-                    .leak(),
-                    ExchangeKind::Fanout,
-                    options,
-                    FieldTable::default(),
-                )
-            })
-            .chain(std::iter::once(
-                channel.exchange_declare(
-                    get_broadcast_exchange_name(
-                        &rabbitmq_options.broadcast_exchange_prefix,
-                        &burst_options.burst_id,
-                        &burst_options.group_id,
-                    )
-                    .leak(),
-                    ExchangeKind::Fanout,
-                    options,
-                    FieldTable::default(),
-                ),
-            )),
-    )
+    futures::future::try_join_all(burst_options.group_ranges.keys().map(|id| {
+        channel.exchange_declare(
+            get_broadcast_exchange_name(
+                &rabbitmq_options.broadcast_exchange_prefix,
+                &burst_options.burst_id,
+                id,
+            )
+            .leak(),
+            ExchangeKind::Fanout,
+            options,
+            FieldTable::default(),
+        )
+    }))
     .await?;
 
     // Declare all queues and bind them to the direct exchange
@@ -205,6 +193,29 @@ async fn init_rabbit(
             let boptions = boptions.clone();
             let roptions = roptions.clone();
             async move {
+                // Declare group broadcast queue
+                let queue_name = get_broadcast_queue_name(
+                    &roptions.broadcast_queue_prefix,
+                    &boptions.burst_id,
+                    group_id,
+                );
+                let q = ch
+                    .queue_declare(queue_name.leak(), options, FieldTable::default())
+                    .await?;
+                // Bind queue to its corresponding broadcast exchange
+                ch.queue_bind(
+                    q.name().as_str(),
+                    &get_broadcast_exchange_name(
+                        &roptions.broadcast_exchange_prefix,
+                        &boptions.burst_id,
+                        group_id,
+                    ),
+                    q.name().as_str(),
+                    QueueBindOptions::default(),
+                    FieldTable::default(),
+                )
+                .await?;
+                // Declare worker queues
                 futures::future::try_join_all(worker_ids.iter().map(move |id| {
                     let ch = ch.clone();
                     let exchange = exchange.clone();
@@ -225,19 +236,6 @@ async fn init_rabbit(
                             FieldTable::default(),
                         )
                         .await?;
-                        // Bind queue to its corresponding broadcast exchange
-                        ch.queue_bind(
-                            q.name().as_str(),
-                            &get_broadcast_exchange_name(
-                                &roptions.broadcast_exchange_prefix,
-                                &boptions.burst_id,
-                                group_id,
-                            ),
-                            q.name().as_str(),
-                            QueueBindOptions::default(),
-                            FieldTable::default(),
-                        )
-                        .await?;
                         Ok::<_, lapin::Error>(())
                     }
                 }))
@@ -249,6 +247,40 @@ async fn init_rabbit(
     .await?;
 
     channel.close(200, "Bye").await?;
+
+    // spawn task to receive broadcast messages and send them to the broadcast proxy
+    let broadcast_channel = connection.create_channel().await?;
+    let broadcast_queue = get_broadcast_queue_name(
+        &rabbitmq_options.broadcast_queue_prefix,
+        &burst_options.burst_id,
+        &burst_options.group_id,
+    );
+    let broadcast_consumer = broadcast_channel
+        .basic_consume(
+            &broadcast_queue,
+            &get_consumer_tag(),
+            BasicConsumeOptions {
+                no_ack: !rabbitmq_options.ack,
+                ..Default::default()
+            },
+            FieldTable::default(),
+        )
+        .await?;
+    let r = rabbitmq_options.clone();
+    tokio::spawn(async move {
+        let mut broadcast_consumer = broadcast_consumer;
+        while let Some(delivery) = broadcast_consumer.next().await {
+            let delivery = delivery.unwrap();
+            if r.ack {
+                broadcast_channel
+                    .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
+                    .await
+                    .unwrap();
+            }
+            let msg = get_message(delivery);
+            broadcast_proxy.broadcast_send(&msg).await.unwrap();
+        }
+    });
 
     Ok(())
 }
@@ -274,9 +306,11 @@ pub struct RabbitMQReceiveProxy {
     consumer: Consumer,
 }
 
+impl Proxy for RabbitMQProxy {}
+
 #[async_trait]
-impl SendReceiveProxy for RabbitMQProxy {
-    async fn broadcast(&self, msg: &Message) -> Result<()> {
+impl BroadcastSendProxy for RabbitMQProxy {
+    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
         if msg.collective != CollectiveType::Broadcast {
             Err("Cannot send non-broadcast message to broadcast".into())
         } else {
@@ -300,6 +334,8 @@ impl SendReceiveProxy for RabbitMQProxy {
         }
     }
 }
+
+impl SendReceiveProxy for RabbitMQProxy {}
 
 #[async_trait]
 impl SendProxy for RabbitMQProxy {
@@ -510,6 +546,10 @@ fn get_broadcast_exchange_name(prefix: &str, burst_id: &str, group_id: &str) -> 
 
 fn get_queue_name(prefix: &str, burst_id: &str, worker_id: u32) -> String {
     format!("{}_{}_worker_{}", prefix, burst_id, worker_id)
+}
+
+fn get_broadcast_queue_name(prefix: &str, burst_id: &str, group_id: &str) -> String {
+    format!("{}_{}_group_{}", prefix, burst_id, group_id)
 }
 
 fn get_consumer_tag() -> String {

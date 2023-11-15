@@ -15,9 +15,10 @@ use crate::{CollectiveType, Error, Message, Result};
 const ROOT_ID: u32 = 0;
 
 #[async_trait]
-pub trait SendReceiveProxy: SendProxy + ReceiveProxy + Send + Sync {
-    async fn broadcast(&self, msg: &Message) -> Result<()>;
-}
+pub trait Proxy: SendReceiveProxy + BroadcastSendProxy + Send + Sync {}
+
+#[async_trait]
+pub trait SendReceiveProxy: SendProxy + ReceiveProxy + Send + Sync {}
 
 #[async_trait]
 pub trait SendProxy: Send + Sync {
@@ -30,11 +31,25 @@ pub trait ReceiveProxy: Send + Sync {
 }
 
 #[async_trait]
+pub trait BroadcastSendProxy: Send + Sync {
+    async fn broadcast_send(&self, msg: &Message) -> Result<()>;
+}
+
+#[async_trait]
 pub trait SendReceiveFactory<T>: Send + Sync {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         options: T,
-    ) -> Result<HashMap<u32, Box<dyn SendReceiveProxy>>>;
+        broadcast_proxy: Box<dyn BroadcastSendProxy>,
+    ) -> Result<HashMap<u32, Box<dyn Proxy>>>;
+}
+
+#[async_trait]
+pub trait SendReceiveLocalFactory<T>: Send + Sync {
+    async fn create_proxies(
+        burst_options: Arc<BurstOptions>,
+        options: T,
+    ) -> Result<(HashMap<u32, Box<dyn Proxy>>, Box<dyn BroadcastSendProxy>)>;
 }
 
 #[derive(Clone, Debug)]
@@ -76,8 +91,8 @@ pub struct BurstMiddleware {
     worker_id: u32,
     group: HashSet<u32>,
 
-    local_send_receive: Arc<dyn SendReceiveProxy>,
-    remote_send_receive: Arc<dyn SendReceiveProxy>,
+    local_send_receive: Arc<dyn Proxy>,
+    remote_send_receive: Arc<dyn Proxy>,
 
     counters: Arc<HashMap<CollectiveType, AtomicU32>>,
 
@@ -91,7 +106,7 @@ impl BurstMiddleware {
         remote_impl_options: RemoteOptions,
     ) -> Result<HashMap<u32, Self>>
     where
-        LocalImpl: SendReceiveFactory<LocalOptions>,
+        LocalImpl: SendReceiveLocalFactory<LocalOptions>,
         RemoteImpl: SendReceiveFactory<RemoteOptions>,
         LocalOptions: Send + Sync,
         RemoteOptions: Send + Sync,
@@ -100,9 +115,11 @@ impl BurstMiddleware {
         let current_group = options.group_ranges.get(&options.group_id).unwrap();
 
         let mut proxies = HashMap::new();
-        let local_proxies = LocalImpl::create_proxies(options.clone(), local_impl_options).await?;
+        let (local_proxies, broadcast_proxy) =
+            LocalImpl::create_proxies(options.clone(), local_impl_options).await?;
         let mut remote_proxies =
-            RemoteImpl::create_proxies(options.clone(), remote_impl_options).await?;
+            RemoteImpl::create_proxies(options.clone(), remote_impl_options, broadcast_proxy)
+                .await?;
 
         for (id, local_proxy) in local_proxies {
             let proxy = BurstMiddleware::new(
@@ -115,13 +132,15 @@ impl BurstMiddleware {
             proxies.insert(id, proxy);
         }
 
+        // Create a thread for this group to receive broadcast messages
+
         Ok(proxies)
     }
 
     pub fn new(
         options: Arc<BurstOptions>,
-        local_proxy: Box<dyn SendReceiveProxy>,
-        remote_proxy: Box<dyn SendReceiveProxy>,
+        local_proxy: Box<dyn Proxy>,
+        remote_proxy: Box<dyn Proxy>,
         worker_id: u32,
         group: HashSet<u32>,
     ) -> Self {
@@ -179,8 +198,8 @@ impl BurstMiddleware {
             };
 
             match tokio::join!(
-                self.local_send_receive.broadcast(&msg),
-                self.remote_send_receive.broadcast(&msg)
+                self.local_send_receive.broadcast_send(&msg),
+                self.remote_send_receive.broadcast_send(&msg)
             ) {
                 (Ok(()), Ok(())) => {}
                 (Err(e), _) | (_, Err(e)) => return Err(e),
@@ -191,11 +210,17 @@ impl BurstMiddleware {
                 .get_message_collective(&CollectiveType::Broadcast)
                 .await
             {
+                // Increment broadcast counter
+                self.increment_counter(&CollectiveType::Broadcast).await;
                 return Ok(msg);
             }
         }
+
+        // Broadcast messages will only be received via the local channel
+        // Remote broadcast messages will be sent to the local channel
+        // by a separate thread
         let m = self
-            .receive_message(|msg| {
+            .receive_message_local(|msg| {
                 msg.collective == CollectiveType::Broadcast && msg.counter.unwrap() == counter
             })
             .await?;
@@ -334,16 +359,7 @@ impl BurstMiddleware {
         P: Fn(&Message) -> bool,
     {
         // Receive from local channel
-        let local = async {
-            loop {
-                // receive blocking
-                let msg = self.receive_local().await?;
-                if filter(&msg) {
-                    return Ok::<Message, Error>(msg);
-                }
-                self.save_message(msg).await;
-            }
-        };
+        let local = self.receive_message_local(&filter);
 
         // Receive from rabbitmq
         let fut = async {
@@ -360,6 +376,21 @@ impl BurstMiddleware {
         tokio::select! {
             msg = local => Ok::<Message, Error>(msg?),
             msg = fut => Ok::<Message, Error>(msg?),
+        }
+    }
+
+    async fn receive_message_local<P>(&self, filter: P) -> Result<Message>
+    where
+        P: Fn(&Message) -> bool,
+    {
+        // Receive from local channel
+        loop {
+            // receive blocking
+            let msg = self.receive_local().await?;
+            if filter(&msg) {
+                return Ok(msg);
+            }
+            self.save_message(msg).await;
         }
     }
 
