@@ -182,6 +182,7 @@ pub enum CollectiveType {
     Broadcast,
     Scatter,
     Gather,
+    AllToAll,
     None,
 }
 
@@ -197,6 +198,7 @@ impl From<&str> for CollectiveType {
             "broadcast" => CollectiveType::Broadcast,
             "scatter" => CollectiveType::Scatter,
             "gather" => CollectiveType::Gather,
+            "alltoall" => CollectiveType::AllToAll,
             _ => CollectiveType::None,
         }
     }
@@ -208,6 +210,7 @@ impl From<u32> for CollectiveType {
             0 => CollectiveType::Broadcast,
             1 => CollectiveType::Scatter,
             2 => CollectiveType::Gather,
+            3 => CollectiveType::AllToAll,
             _ => CollectiveType::None,
         }
     }

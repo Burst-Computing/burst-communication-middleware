@@ -8,6 +8,8 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::Future;
+use log::debug;
 use tokio::sync::RwLock;
 
 use crate::{CollectiveType, Error, Message, Result};
@@ -150,6 +152,7 @@ impl BurstMiddleware {
             CollectiveType::Broadcast,
             CollectiveType::Gather,
             CollectiveType::Scatter,
+            CollectiveType::AllToAll,
         ] {
             counters.insert(*collective, AtomicU32::new(0));
         }
@@ -322,6 +325,54 @@ impl BurstMiddleware {
         }
         // Increment scatter counter
         self.increment_counter(&CollectiveType::Scatter).await;
+        Ok(r)
+    }
+
+    pub async fn all_to_all(&self, data: Vec<Bytes>) -> Result<Vec<Message>> {
+        let counter = self.get_counter(&CollectiveType::AllToAll).await;
+
+        if data.len() != self.options.burst_size as usize {
+            return Err("Data size must be equal to burst size".into());
+        }
+
+        debug!("Worker {} sending all_to_all", self.worker_id);
+        // first send to all workers
+        futures::future::try_join_all(data.into_iter().enumerate().map(|(i, data)| {
+            self.send_collective(i as u32, data, CollectiveType::AllToAll, Some(counter))
+        }))
+        .await?;
+
+        debug!("Worker {} receiving all_to_all", self.worker_id);
+        //let message_count = Arc::new(AtomicU32::new(0));
+        // then receive from all workers
+        let mut r = futures::future::try_join_all((0..self.options.burst_size).map(|_| {
+            //let message_count = message_count.clone();
+            async move {
+                let r = self
+                    .receive_message(|msg| {
+                        msg.collective == CollectiveType::AllToAll
+                            && msg.counter.unwrap() == counter
+                    })
+                    .await?;
+                //message_count.fetch_add(1, Ordering::Relaxed);
+                //let message_count = message_count.load(Ordering::Relaxed);
+                // debug!(
+                //     "Worker {} received {} all_to_all messages, remaining {}",
+                //     self.worker_id,
+                //     message_count,
+                //     self.options.burst_size - message_count
+                // );
+                Ok::<Message, Error>(r)
+            }
+        }))
+        .await?;
+
+        debug!("Worker {} sorting all_to_all", self.worker_id);
+        // Sort by sender_id
+        r.sort_by_key(|msg| msg.sender_id);
+
+        // Increment all_to_all counter
+        self.increment_counter(&CollectiveType::AllToAll).await;
         Ok(r)
     }
 
