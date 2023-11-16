@@ -290,6 +290,41 @@ impl BurstMiddleware {
         Ok(r)
     }
 
+    pub async fn scatter(&self, data: Option<Vec<Bytes>>) -> Result<Option<Message>> {
+        let counter = self.get_counter(&CollectiveType::Scatter).await;
+        let mut r = None;
+
+        if self.worker_id == ROOT_ID {
+            if data.is_none() {
+                return Err("Root worker must send data".into());
+            }
+            let data = data.unwrap();
+            if data.len() != (self.options.burst_size - 1) as usize {
+                return Err("Data size must be equal to burst size - 1".into());
+            }
+
+            futures::future::try_join_all(data.into_iter().enumerate().map(|(i, data)| {
+                self.send_collective(i as u32 + 1, data, CollectiveType::Scatter, Some(counter))
+            }))
+            .await?;
+        } else {
+            // If there is a message in the buffer, return it
+            r = if let Some(msg) = self.get_message_collective(&CollectiveType::Scatter).await {
+                Some(msg)
+            } else {
+                Some(
+                    self.receive_message(|msg| {
+                        msg.collective == CollectiveType::Scatter && msg.counter.unwrap() == counter
+                    })
+                    .await?,
+                )
+            };
+        }
+        // Increment scatter counter
+        self.increment_counter(&CollectiveType::Scatter).await;
+        Ok(r)
+    }
+
     pub fn info(&self) -> BurstInfo {
         BurstInfo {
             burst_id: &self.options.burst_id,
