@@ -196,12 +196,13 @@ impl RedisProxy {
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
     ) -> Result<Self> {
+        let connection = client.get_multiplexed_async_connection().await?;
         Ok(Self {
-            connection: client.get_multiplexed_async_connection().await?,
+            connection: connection.clone(),
             worker_id,
             sender: Box::new(
                 RedisSendProxy::new(
-                    client.get_multiplexed_async_connection().await?,
+                    connection,
                     redis_options.clone(),
                     burst_options.clone(),
                 )
