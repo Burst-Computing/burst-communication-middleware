@@ -357,7 +357,7 @@ impl ReceiveProxy for S3ReceiveProxy {
                         chunk_id: 0,
                         last_chunk: true,
                         counter: Some(0),
-                        collective: CollectiveType::Broadcast,
+                        collective: CollectiveType::None,
                         data: Bytes::from(bytes),
                     };
                     return Ok(msg);
