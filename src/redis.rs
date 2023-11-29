@@ -9,8 +9,8 @@ use redis::{
 use tokio::sync::RwLock;
 
 use crate::{
-    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, Proxy,
-    ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
+    Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
 };
 
 #[derive(Clone, Debug)]
@@ -59,7 +59,10 @@ impl SendReceiveFactory<RedisOptions> for RedisImpl {
         burst_options: Arc<BurstOptions>,
         redis_options: RedisOptions,
         broadcast_proxy: Box<dyn BroadcastSendProxy>,
-    ) -> Result<HashMap<u32, Box<dyn Proxy>>> {
+    ) -> Result<(
+        HashMap<u32, Box<dyn SendReceiveProxy>>,
+        Box<dyn BroadcastSendProxy>,
+    )> {
         let redis_options = Arc::new(redis_options);
         let client = Client::open(redis_options.redis_uri.clone())?;
 
@@ -87,10 +90,20 @@ impl SendReceiveFactory<RedisOptions> for RedisImpl {
         .await?
         .into_iter()
         .for_each(|proxy| {
-            hmap.insert(proxy.worker_id, Box::new(proxy) as Box<dyn Proxy>);
+            hmap.insert(
+                proxy.worker_id,
+                Box::new(proxy) as Box<dyn SendReceiveProxy>,
+            );
         });
 
-        Ok(hmap)
+        Ok((
+            hmap,
+            Box::new(RedisBroadcastSendProxy::new(
+                client.get_multiplexed_async_connection().await?,
+                redis_options,
+                burst_options,
+            )) as Box<dyn BroadcastSendProxy>,
+        ))
     }
 }
 
@@ -122,9 +135,6 @@ async fn init_redis(
 }
 
 pub struct RedisProxy {
-    connection: MultiplexedConnection,
-    redis_options: Arc<RedisOptions>,
-    burst_options: Arc<BurstOptions>,
     worker_id: u32,
     receiver: Box<dyn ReceiveProxy>,
     sender: Box<dyn SendProxy>,
@@ -144,33 +154,10 @@ pub struct RedisReceiveProxy {
     last_id: Arc<RwLock<String>>,
 }
 
-impl Proxy for RedisProxy {}
-
-#[async_trait]
-impl BroadcastSendProxy for RedisProxy {
-    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
-        if msg.collective != CollectiveType::Broadcast {
-            Err("Cannot send non-broadcast message to broadcast".into())
-        } else {
-            futures::future::try_join_all(
-                self.burst_options
-                    .group_ranges
-                    .keys()
-                    .filter(|dest| **dest != self.burst_options.group_id)
-                    .map(|dest| {
-                        send_broadcast(
-                            self.connection.clone(),
-                            msg,
-                            dest,
-                            &self.redis_options,
-                            &self.burst_options,
-                        )
-                    }),
-            )
-            .await?;
-            Ok(())
-        }
-    }
+pub struct RedisBroadcastSendProxy {
+    connection: MultiplexedConnection,
+    redis_options: Arc<RedisOptions>,
+    burst_options: Arc<BurstOptions>,
 }
 
 impl SendReceiveProxy for RedisProxy {}
@@ -196,13 +183,11 @@ impl RedisProxy {
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
     ) -> Result<Self> {
-        let connection = client.get_multiplexed_async_connection().await?;
         Ok(Self {
-            connection: connection.clone(),
             worker_id,
             sender: Box::new(
                 RedisSendProxy::new(
-                    connection,
+                    client.get_multiplexed_async_connection().await?,
                     redis_options.clone(),
                     burst_options.clone(),
                 )
@@ -217,8 +202,6 @@ impl RedisProxy {
                 )
                 .await?,
             ),
-            redis_options,
-            burst_options,
         })
     }
 }
@@ -238,16 +221,16 @@ impl SendProxy for RedisSendProxy {
 }
 
 impl RedisSendProxy {
-    pub async fn new(
+    pub fn new(
         connection: MultiplexedConnection,
         redis_options: Arc<RedisOptions>,
         burst_options: Arc<BurstOptions>,
-    ) -> Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             connection,
             redis_options,
             burst_options,
-        })
+        }
     }
 }
 
@@ -274,19 +257,60 @@ impl ReceiveProxy for RedisReceiveProxy {
 }
 
 impl RedisReceiveProxy {
-    pub async fn new(
+    pub fn new(
         connection: MultiplexedConnection,
         redis_options: Arc<RedisOptions>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
-    ) -> Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             connection,
             redis_options,
             burst_options,
             worker_id,
             last_id: Arc::new(RwLock::new("0".to_string())),
-        })
+        }
+    }
+}
+
+impl RedisBroadcastSendProxy {
+    pub fn new(
+        connection: MultiplexedConnection,
+        redis_options: Arc<RedisOptions>,
+        burst_options: Arc<BurstOptions>,
+    ) -> Self {
+        Self {
+            connection,
+            redis_options,
+            burst_options,
+        }
+    }
+}
+
+#[async_trait]
+impl BroadcastSendProxy for RedisBroadcastSendProxy {
+    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
+        if msg.collective != CollectiveType::Broadcast {
+            Err("Cannot send non-broadcast message to broadcast".into())
+        } else {
+            futures::future::try_join_all(
+                self.burst_options
+                    .group_ranges
+                    .keys()
+                    .filter(|dest| **dest != self.burst_options.group_id)
+                    .map(|dest| {
+                        send_broadcast(
+                            self.connection.clone(),
+                            msg,
+                            dest,
+                            &self.redis_options,
+                            &self.burst_options,
+                        )
+                    }),
+            )
+            .await?;
+            Ok(())
+        }
     }
 }
 

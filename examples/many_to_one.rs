@@ -97,23 +97,28 @@ async fn group<'a>(
 }
 pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std::error::Error>> {
     if burst_middleware.info().worker_id == 0 {
-        let mut count = 0;
-        loop {
-            let msg = burst_middleware.recv().await.unwrap();
-            info!(
-                "worker {} received message: {:?}",
-                burst_middleware.info().worker_id,
-                msg
-            );
-            count += 1;
-            if count == REPEAT * (BURST_SIZE - 1) {
-                break;
-            }
+        let mut messages = Vec::new();
+        for _ in 0..REPEAT {
+            let msgs =
+                futures::future::try_join_all((1..burst_middleware.info().burst_size).map(|i| {
+                    let burst_middleware = burst_middleware.clone();
+                    async move {
+                        let msg = burst_middleware.recv(i).await.unwrap();
+                        info!(
+                            "[worker {}] received message {}",
+                            burst_middleware.info().worker_id,
+                            i
+                        );
+                        Ok::<_, Box<dyn std::error::Error>>(msg)
+                    }
+                }))
+                .await?;
+            messages.extend(msgs);
         }
         info!(
             "worker {} received a total of {} messages",
             burst_middleware.info().worker_id,
-            count
+            messages.len()
         );
     } else {
         for i in 0..REPEAT {

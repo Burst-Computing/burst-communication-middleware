@@ -1,3 +1,7 @@
+//#![feature(trait_upcasting)]
+
+mod counter;
+mod message_store;
 mod middleware;
 mod rabbit;
 mod redis;
@@ -12,4 +16,3 @@ pub use redis::*;
 pub use s3::*;
 pub use tokio_channel::*;
 pub use types::*;
-pub use utils::*;

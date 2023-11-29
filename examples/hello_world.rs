@@ -79,18 +79,20 @@ pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std
         let payload = Bytes::from(message);
         burst_middleware.send(1, payload).await.unwrap();
 
-        let response = burst_middleware.recv().await.unwrap();
+        let response = burst_middleware.recv(1).await.unwrap();
         info!(
-            "worker {} received message: {:?}",
+            "worker {} received message: {:?}, data: {:?}",
             burst_middleware.info().worker_id,
-            response
+            response,
+            response.data
         );
     } else {
-        let message = burst_middleware.recv().await.unwrap();
+        let message = burst_middleware.recv(0).await.unwrap();
         info!(
-            "worker {} received message: {:?}",
+            "worker {} received message: {:?}, data: {:?}",
             burst_middleware.info().worker_id,
-            message
+            message,
+            message.data
         );
         let response = "bye!".to_string();
         let payload = Bytes::from(response);
