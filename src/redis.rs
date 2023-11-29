@@ -185,23 +185,17 @@ impl RedisProxy {
     ) -> Result<Self> {
         Ok(Self {
             worker_id,
-            sender: Box::new(
-                RedisSendProxy::new(
-                    client.get_multiplexed_async_connection().await?,
-                    redis_options.clone(),
-                    burst_options.clone(),
-                )
-                .await?,
-            ),
-            receiver: Box::new(
-                RedisReceiveProxy::new(
-                    client.get_multiplexed_async_connection().await?,
-                    redis_options.clone(),
-                    burst_options.clone(),
-                    worker_id,
-                )
-                .await?,
-            ),
+            sender: Box::new(RedisSendProxy::new(
+                client.get_multiplexed_async_connection().await?,
+                redis_options.clone(),
+                burst_options.clone(),
+            )),
+            receiver: Box::new(RedisReceiveProxy::new(
+                client.get_multiplexed_async_connection().await?,
+                redis_options.clone(),
+                burst_options.clone(),
+                worker_id,
+            )),
         })
     }
 }

@@ -9,8 +9,8 @@ use aws_sdk_s3::{primitives::ByteStream, Client};
 use bytes::Bytes;
 
 use crate::{
-    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, Proxy,
-    ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
+    Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
 };
 
 #[derive(Clone, Debug)]
@@ -93,7 +93,10 @@ impl SendReceiveFactory<S3Options> for S3Impl {
         burst_options: Arc<BurstOptions>,
         s3_options: S3Options,
         broadcast_proxy: Box<dyn BroadcastSendProxy>,
-    ) -> Result<HashMap<u32, Box<dyn Proxy>>> {
+    ) -> Result<(
+        HashMap<u32, Box<dyn SendReceiveProxy>>,
+        Box<dyn BroadcastSendProxy>,
+    )> {
         let credentials_provider = Credentials::from_keys(
             s3_options.access_key_id.clone(),
             s3_options.secret_access_key.clone(),
@@ -143,20 +146,22 @@ impl SendReceiveFactory<S3Options> for S3Impl {
                 s3_options.clone(),
                 burst_options.clone(),
                 *worker_id,
-            )
-            .await?;
-            hmap.insert(*worker_id, Box::new(p) as Box<dyn Proxy>);
+            );
+            hmap.insert(*worker_id, Box::new(p) as Box<dyn SendReceiveProxy>);
         }
 
-        Ok(hmap)
+        Ok((
+            hmap,
+            Box::new(S3BroadcastSendProxy::new(
+                s3_client,
+                s3_options,
+                burst_options,
+            )),
+        ))
     }
 }
 
 pub struct S3Proxy {
-    s3_options: Arc<S3Options>,
-    s3_client: Client,
-    burst_options: Arc<BurstOptions>,
-    worker_id: u32,
     receiver: Box<dyn ReceiveProxy>,
     sender: Box<dyn SendProxy>,
 }
@@ -175,13 +180,10 @@ pub struct S3ReceiveProxy {
     worker_id: u32,
 }
 
-impl Proxy for S3Proxy {}
-
-#[async_trait]
-impl BroadcastSendProxy for S3Proxy {
-    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
-        Ok(())
-    }
+pub struct S3BroadcastSendProxy {
+    s3_client: Client,
+    s3_options: Arc<S3Options>,
+    burst_options: Arc<BurstOptions>,
 }
 
 impl SendReceiveProxy for S3Proxy {}
@@ -201,52 +203,42 @@ impl ReceiveProxy for S3Proxy {
 }
 
 impl S3Proxy {
-    pub async fn new(
+    pub fn new(
         s3_client: Client,
         s3_options: Arc<S3Options>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
-    ) -> Result<Self> {
-        Ok(Self {
-            worker_id: worker_id,
-            sender: Box::new(
-                S3SendProxy::new(
-                    s3_client.clone(),
-                    s3_options.clone(),
-                    burst_options.clone(),
-                    worker_id,
-                )
-                .await?,
-            ),
-            receiver: Box::new(
-                S3ReceiveProxy::new(
-                    s3_client.clone(),
-                    s3_options.clone(),
-                    burst_options.clone(),
-                    worker_id,
-                )
-                .await?,
-            ),
-            s3_options: s3_options,
-            burst_options: burst_options,
-            s3_client: s3_client,
-        })
+    ) -> Self {
+        Self {
+            sender: Box::new(S3SendProxy::new(
+                s3_client.clone(),
+                s3_options.clone(),
+                burst_options.clone(),
+                worker_id,
+            )),
+            receiver: Box::new(S3ReceiveProxy::new(
+                s3_client.clone(),
+                s3_options.clone(),
+                burst_options.clone(),
+                worker_id,
+            )),
+        }
     }
 }
 
 impl S3SendProxy {
-    pub async fn new(
+    pub fn new(
         s3_client: Client,
         s3_options: Arc<S3Options>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
-    ) -> Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             s3_client,
             s3_options,
             burst_options,
             worker_id,
-        })
+        }
     }
 }
 
@@ -273,18 +265,18 @@ impl SendProxy for S3SendProxy {
 }
 
 impl S3ReceiveProxy {
-    pub async fn new(
+    pub fn new(
         s3_client: Client,
         s3_options: Arc<S3Options>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
-    ) -> Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             s3_client,
             s3_options,
             burst_options,
             worker_id,
-        })
+        }
     }
 }
 
@@ -356,8 +348,8 @@ impl ReceiveProxy for S3ReceiveProxy {
                         sender_id: sender_id,
                         chunk_id: 0,
                         last_chunk: true,
-                        counter: Some(0),
-                        collective: CollectiveType::None,
+                        counter: 0,
+                        collective: CollectiveType::Direct,
                         data: Bytes::from(bytes),
                     };
                     return Ok(msg);
@@ -373,6 +365,27 @@ impl ReceiveProxy for S3ReceiveProxy {
                 .await;
             }
         }
+    }
+}
+
+impl S3BroadcastSendProxy {
+    pub fn new(
+        s3_client: Client,
+        s3_options: Arc<S3Options>,
+        burst_options: Arc<BurstOptions>,
+    ) -> Self {
+        Self {
+            s3_client,
+            s3_options,
+            burst_options,
+        }
+    }
+}
+
+#[async_trait]
+impl BroadcastSendProxy for S3BroadcastSendProxy {
+    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
+        unimplemented!()
     }
 }
 
