@@ -16,8 +16,8 @@ use lapin::{
 use uuid::Uuid;
 
 use crate::{
-    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, Proxy,
-    ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
+    Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
 };
 
 #[derive(Clone, Debug)]
@@ -96,7 +96,10 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
         burst_options: Arc<BurstOptions>,
         rabbitmq_options: RabbitMQOptions,
         broadcast_proxy: Box<dyn BroadcastSendProxy>,
-    ) -> Result<HashMap<u32, Box<dyn Proxy>>> {
+    ) -> Result<(
+        HashMap<u32, Box<dyn SendReceiveProxy>>,
+        Box<dyn BroadcastSendProxy>,
+    )> {
         let connection = Arc::new(
             Connection::connect(&rabbitmq_options.rabbitmq_uri, Default::default()).await?,
         );
@@ -125,10 +128,19 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
         .await?
         .into_iter()
         .for_each(|proxy| {
-            hmap.insert(proxy.worker_id, Box::new(proxy) as Box<dyn Proxy>);
+            hmap.insert(
+                proxy.worker_id,
+                Box::new(proxy) as Box<dyn SendReceiveProxy>,
+            );
         });
 
-        Ok(hmap)
+        Ok((
+            hmap,
+            Box::new(
+                RabbitMQBroadcastSendProxy::new(connection, rabbitmq_options, burst_options)
+                    .await?,
+            ) as Box<dyn BroadcastSendProxy>,
+        ))
     }
 }
 
@@ -286,9 +298,6 @@ async fn init_rabbit(
 }
 
 pub struct RabbitMQProxy {
-    channel: Channel,
-    rabbitmq_options: Arc<RabbitMQOptions>,
-    burst_options: Arc<BurstOptions>,
     worker_id: u32,
     receiver: Box<dyn ReceiveProxy>,
     sender: Box<dyn SendProxy>,
@@ -306,33 +315,10 @@ pub struct RabbitMQReceiveProxy {
     consumer: Consumer,
 }
 
-impl Proxy for RabbitMQProxy {}
-
-#[async_trait]
-impl BroadcastSendProxy for RabbitMQProxy {
-    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
-        if msg.collective != CollectiveType::Broadcast {
-            Err("Cannot send non-broadcast message to broadcast".into())
-        } else {
-            futures::future::try_join_all(
-                self.burst_options
-                    .group_ranges
-                    .keys()
-                    .filter(|dest| **dest != self.burst_options.group_id)
-                    .map(|dest| {
-                        send_broadcast(
-                            &self.channel,
-                            msg,
-                            dest,
-                            &self.rabbitmq_options,
-                            &self.burst_options,
-                        )
-                    }),
-            )
-            .await?;
-            Ok(())
-        }
-    }
+pub struct RabbitMQBroadcastSendProxy {
+    channel: Channel,
+    rabbitmq_options: Arc<RabbitMQOptions>,
+    burst_options: Arc<BurstOptions>,
 }
 
 impl SendReceiveProxy for RabbitMQProxy {}
@@ -358,10 +344,7 @@ impl RabbitMQProxy {
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
     ) -> Result<Self> {
-        let channel = connection.create_channel().await?;
-
         Ok(Self {
-            channel,
             worker_id,
             sender: Box::new(
                 RabbitMQSendProxy::new(
@@ -380,8 +363,6 @@ impl RabbitMQProxy {
                 )
                 .await?,
             ),
-            rabbitmq_options,
-            burst_options,
         })
     }
 }
@@ -429,6 +410,48 @@ impl ReceiveProxy for RabbitMQReceiveProxy {
                 .await?;
         }
         Ok(get_message(delivery))
+    }
+}
+
+impl RabbitMQBroadcastSendProxy {
+    pub async fn new(
+        connection: Arc<Connection>,
+        rabbitmq_options: Arc<RabbitMQOptions>,
+        burst_options: Arc<BurstOptions>,
+    ) -> Result<Self> {
+        let channel = connection.create_channel().await?;
+        Ok(Self {
+            channel,
+            rabbitmq_options,
+            burst_options,
+        })
+    }
+}
+
+#[async_trait]
+impl BroadcastSendProxy for RabbitMQBroadcastSendProxy {
+    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
+        if msg.collective != CollectiveType::Broadcast {
+            Err("Cannot send non-broadcast message to broadcast".into())
+        } else {
+            futures::future::try_join_all(
+                self.burst_options
+                    .group_ranges
+                    .keys()
+                    .filter(|dest| **dest != self.burst_options.group_id)
+                    .map(|dest| {
+                        send_broadcast(
+                            &self.channel,
+                            msg,
+                            dest,
+                            &self.rabbitmq_options,
+                            &self.burst_options,
+                        )
+                    }),
+            )
+            .await?;
+            Ok(())
+        }
     }
 }
 
@@ -516,9 +539,8 @@ async fn send_rabbit(
     fields.insert("sender_id".into(), AMQPValue::LongUInt(msg.sender_id));
     fields.insert("chunk_id".into(), AMQPValue::LongUInt(msg.chunk_id));
     fields.insert("last_chunk".into(), AMQPValue::Boolean(msg.last_chunk));
-    if let Some(counter) = msg.counter {
-        fields.insert("counter".into(), AMQPValue::LongUInt(counter));
-    }
+    fields.insert("counter".into(), AMQPValue::LongUInt(msg.counter));
+
     fields.insert(
         "collective".into(),
         AMQPValue::LongUInt(msg.collective as u32),
@@ -594,11 +616,10 @@ fn get_message(delivery: Delivery) -> Message {
         .as_ref()
         .unwrap()
         .inner()
-        .get("counter");
-    let counter = match counter {
-        Some(counter) => Some(counter.as_long_uint().unwrap()),
-        None => None,
-    };
+        .get("counter")
+        .unwrap()
+        .as_long_uint()
+        .unwrap();
     let collective = delivery
         .properties
         .headers()

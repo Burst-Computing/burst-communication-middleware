@@ -11,7 +11,7 @@ pub struct Message {
     pub sender_id: u32,
     pub chunk_id: u32,
     pub last_chunk: bool,
-    pub counter: Option<u32>,
+    pub counter: u32,
     pub collective: CollectiveType,
     pub data: Bytes,
 }
@@ -21,8 +21,8 @@ impl FromIterator<(String, Vec<u8>)> for Message {
         let mut sender_id = 0;
         let mut chunk_id = 0;
         let mut last_chunk = false;
-        let mut counter = None;
-        let mut collective = CollectiveType::None;
+        let mut counter = 0;
+        let mut collective = CollectiveType::Direct;
         let mut data = Bytes::new();
 
         for (k, v) in iter {
@@ -31,10 +31,7 @@ impl FromIterator<(String, Vec<u8>)> for Message {
                 "chunk_id" => chunk_id = u32::from_le_bytes(v[..4].try_into().unwrap()),
                 "last_chunk" => last_chunk = u8::from_le_bytes(v[..1].try_into().unwrap()) != 0,
                 "counter" => {
-                    counter = match v.len() {
-                        0 => None,
-                        _ => Some(u32::from_le_bytes(v[..4].try_into().unwrap())),
-                    }
+                    counter = u32::from_le_bytes(v[..4].try_into().unwrap());
                 }
                 "collective" => {
                     collective =
@@ -44,7 +41,6 @@ impl FromIterator<(String, Vec<u8>)> for Message {
                 _ => (),
             }
         }
-
         Message {
             sender_id,
             chunk_id,
@@ -82,10 +78,7 @@ impl Iterator for MessageIntoIterator {
             ),
             3 => (
                 "counter".to_string(),
-                match self.msg.counter {
-                    None => Vec::new(),
-                    Some(n) => n.to_le_bytes().to_vec(),
-                },
+                self.msg.counter.to_le_bytes().to_vec(),
             ),
             4 => (
                 "collective".to_string(),
@@ -124,9 +117,7 @@ impl From<Message> for Vec<(String, Vec<u8>)> {
                 .to_le_bytes()
                 .to_vec(),
         ));
-        if let Some(n) = msg.counter {
-            v.push(("counter".to_string(), n.to_le_bytes().to_vec()));
-        }
+        v.push(("counter".to_string(), msg.counter.to_le_bytes().to_vec()));
         v.push((
             "collective".to_string(),
             (msg.collective as u32).to_le_bytes().to_vec(),
@@ -182,8 +173,8 @@ pub enum CollectiveType {
     Broadcast,
     Scatter,
     Gather,
+    Direct,
     AllToAll,
-    None,
 }
 
 impl Display for CollectiveType {
@@ -198,8 +189,7 @@ impl From<&str> for CollectiveType {
             "broadcast" => CollectiveType::Broadcast,
             "scatter" => CollectiveType::Scatter,
             "gather" => CollectiveType::Gather,
-            "alltoall" => CollectiveType::AllToAll,
-            _ => CollectiveType::None,
+            _ => CollectiveType::Direct,
         }
     }
 }
@@ -210,8 +200,7 @@ impl From<u32> for CollectiveType {
             0 => CollectiveType::Broadcast,
             1 => CollectiveType::Scatter,
             2 => CollectiveType::Gather,
-            3 => CollectiveType::AllToAll,
-            _ => CollectiveType::None,
+            _ => CollectiveType::Direct,
         }
     }
 }
