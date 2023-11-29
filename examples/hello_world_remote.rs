@@ -119,7 +119,7 @@ pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std
             "worker {} waiting for response...",
             burst_middleware.info().worker_id
         );
-        let response = burst_middleware.recv().await.unwrap();
+        let response = burst_middleware.recv(1).await.unwrap();
         info!(
             "worker {} received message: {:?}",
             burst_middleware.info().worker_id,
@@ -130,7 +130,7 @@ pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std
             "worker {} waiting for message...",
             burst_middleware.info().worker_id
         );
-        let message = burst_middleware.recv().await.unwrap();
+        let message = burst_middleware.recv(0).await.unwrap();
         info!(
             "worker {} received message: {:?}",
             burst_middleware.info().worker_id,
