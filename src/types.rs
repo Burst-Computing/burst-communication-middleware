@@ -1,12 +1,12 @@
 use std::fmt::{Debug, Display};
 
 use bytes::Bytes;
-use redis::streams::StreamReadReply;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone)]
+#[repr(C)]
 pub struct Message {
     pub sender_id: u32,
     pub chunk_id: u32,
@@ -16,142 +16,69 @@ pub struct Message {
     pub data: Bytes,
 }
 
-impl FromIterator<(String, Vec<u8>)> for Message {
-    fn from_iter<T: IntoIterator<Item = (String, Vec<u8>)>>(iter: T) -> Self {
-        let mut sender_id = 0;
-        let mut chunk_id = 0;
-        let mut last_chunk = false;
-        let mut counter = 0;
-        let mut collective = CollectiveType::Direct;
-        let mut data = Bytes::new();
-
-        for (k, v) in iter {
-            match k.as_str() {
-                "sender_id" => sender_id = u32::from_le_bytes(v[..4].try_into().unwrap()),
-                "chunk_id" => chunk_id = u32::from_le_bytes(v[..4].try_into().unwrap()),
-                "last_chunk" => last_chunk = u8::from_le_bytes(v[..1].try_into().unwrap()) != 0,
-                "counter" => {
-                    counter = u32::from_le_bytes(v[..4].try_into().unwrap());
-                }
-                "collective" => {
-                    collective =
-                        CollectiveType::from(u32::from_le_bytes(v[..4].try_into().unwrap()))
-                }
-                "data" => data = v.into(),
-                _ => (),
-            }
-        }
-        Message {
-            sender_id,
-            chunk_id,
-            last_chunk,
-            counter,
-            collective,
-            data,
-        }
-    }
-}
-
-pub struct MessageIntoIterator {
-    msg: Message,
-    index: u32,
-}
-
-impl Iterator for MessageIntoIterator {
-    type Item = (String, Vec<u8>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let result = match self.index {
-            0 => (
-                "sender_id".to_string(),
-                self.msg.sender_id.to_le_bytes().to_vec(),
-            ),
-            1 => (
-                "chunk_id".to_string(),
-                self.msg.chunk_id.to_le_bytes().to_vec(),
-            ),
-            2 => (
-                "last_chunk".to_string(),
-                (if self.msg.last_chunk { 1 } else { 0 as u32 })
-                    .to_le_bytes()
-                    .to_vec(),
-            ),
-            3 => (
-                "counter".to_string(),
-                self.msg.counter.to_le_bytes().to_vec(),
-            ),
-            4 => (
-                "collective".to_string(),
-                (self.msg.collective as u32).to_le_bytes().to_vec(),
-            ),
-            5 => ("data".to_string(), self.msg.data.to_vec()),
-            _ => return None,
+// Serialize message to two chunks of contiguous bytes
+// without memory allocations
+impl<'a> From<&'a Message> for [&'a [u8]; 2] {
+    fn from(msg: &'a Message) -> Self {
+        let bytes = msg.data.as_ref();
+        let msg_header = unsafe {
+            std::slice::from_raw_parts(
+                msg as *const Message as *const u8,
+                std::mem::size_of::<Message>() - std::mem::size_of::<Bytes>(),
+            )
         };
-        self.index += 1;
-        Some(result)
+        [msg_header, bytes]
     }
 }
 
-impl IntoIterator for Message {
-    type Item = (String, Vec<u8>);
-    type IntoIter = std::vec::IntoIter<Self::Item>;
+// Deserialize message from a chunk of contiguous bytes
+// without memory allocations
+impl From<Vec<u8>> for Message {
+    fn from(v: Vec<u8>) -> Self {
+        let header_size = std::mem::size_of::<Message>() - std::mem::size_of::<Bytes>();
+        let (header, _) = v.split_at(header_size);
 
-    fn into_iter(self) -> Self::IntoIter {
-        let v: Vec<(String, Vec<u8>)> = self.into();
-        v.into_iter()
+        let mut msg = deserialize_header(&header);
+
+        let mut data = Bytes::from(v);
+        msg.data = data.split_off(header_size);
+
+        msg
     }
 }
 
-impl From<Message> for Vec<(String, Vec<u8>)> {
-    fn from(msg: Message) -> Self {
-        let mut v = Vec::new();
+impl From<(Vec<u8>, Vec<u8>)> for Message {
+    fn from(v: (Vec<u8>, Vec<u8>)) -> Self {
+        let (header, data) = v;
 
-        v.push((
-            "sender_id".to_string(),
-            msg.sender_id.to_le_bytes().to_vec(),
-        ));
-        v.push(("chunk_id".to_string(), msg.chunk_id.to_le_bytes().to_vec()));
-        v.push((
-            "last_chunk".to_string(),
-            (if msg.last_chunk { 1 } else { 0 as u32 })
-                .to_le_bytes()
-                .to_vec(),
-        ));
-        v.push(("counter".to_string(), msg.counter.to_le_bytes().to_vec()));
-        v.push((
-            "collective".to_string(),
-            (msg.collective as u32).to_le_bytes().to_vec(),
-        ));
-        v.push(("data".to_string(), msg.data.to_vec()));
+        let mut msg = deserialize_header(&header);
+        msg.data = Bytes::from(data);
 
-        v
+        msg
     }
 }
 
-impl From<StreamReadReply> for Message {
-    fn from(reply: StreamReadReply) -> Self {
-        reply
-            .keys
-            .into_iter()
-            .next()
-            .unwrap()
-            .ids
-            .into_iter()
-            .next()
-            .unwrap()
-            .map
-            .into_iter()
-            .map(|(k, v)| {
-                (
-                    k,
-                    match v {
-                        redis::Value::Data(v) => v,
-                        _ => Vec::new(),
-                    },
-                )
-            })
-            .collect::<Message>()
+// Deserialize the header from a chunk of contiguous bytes
+fn deserialize_header(header: &[u8]) -> Message {
+    let mut msg = Message {
+        sender_id: 0,
+        chunk_id: 0,
+        last_chunk: false,
+        counter: 0,
+        collective: CollectiveType::Direct,
+        data: Bytes::new(),
+    };
+
+    // owerwrite the message with the header data
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            header.as_ptr(),
+            &mut msg as *mut Message as *mut u8,
+            header.len(),
+        );
     }
+
+    msg
 }
 
 impl Debug for Message {
@@ -170,10 +97,10 @@ impl Debug for Message {
 // types of collectives
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum CollectiveType {
+    Direct,
     Broadcast,
     Scatter,
     Gather,
-    Direct,
     AllToAll,
 }
 
@@ -186,10 +113,12 @@ impl Display for CollectiveType {
 impl From<&str> for CollectiveType {
     fn from(s: &str) -> Self {
         match s.to_lowercase().as_str() {
+            "direct" => CollectiveType::Direct,
             "broadcast" => CollectiveType::Broadcast,
             "scatter" => CollectiveType::Scatter,
             "gather" => CollectiveType::Gather,
-            _ => CollectiveType::Direct,
+            "alltoall" => CollectiveType::AllToAll,
+            _ => panic!("Invalid collective type: {:?}", s),
         }
     }
 }
@@ -197,10 +126,12 @@ impl From<&str> for CollectiveType {
 impl From<u32> for CollectiveType {
     fn from(n: u32) -> Self {
         match n {
-            0 => CollectiveType::Broadcast,
-            1 => CollectiveType::Scatter,
-            2 => CollectiveType::Gather,
-            _ => CollectiveType::Direct,
+            0 => CollectiveType::Direct,
+            1 => CollectiveType::Broadcast,
+            2 => CollectiveType::Scatter,
+            3 => CollectiveType::Gather,
+            4 => CollectiveType::AllToAll,
+            _ => panic!("Invalid collective type: {:?}", n),
         }
     }
 }

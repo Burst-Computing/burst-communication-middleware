@@ -30,6 +30,8 @@ pub trait MessageStore: Send + Sync {
     fn get(&self, sender_id: &u32, collective: &CollectiveType, counter: &u32) -> Vec<Message>;
 }
 
+/// A `MessageStore` implementation that uses a `HashMap` to store messages.
+#[derive(Debug)]
 pub struct MessageStoreHashMap {
     messages: HashMap<u32, HashMap<CollectiveType, RwLock<HashMap<u32, RwLock<Vec<Message>>>>>>,
 }

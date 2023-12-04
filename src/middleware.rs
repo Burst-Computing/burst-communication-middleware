@@ -5,7 +5,6 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use log::debug;
 
 use crate::{
     counter::AtomicCounter,
@@ -178,10 +177,11 @@ impl BurstMiddleware {
         let message_store = Arc::new(MessageStoreHashMap::new(
             (0..options.burst_size).into_iter(),
             &[
-                CollectiveType::Broadcast,
-                CollectiveType::Gather,
-                CollectiveType::Scatter,
                 CollectiveType::Direct,
+                CollectiveType::Broadcast,
+                CollectiveType::Scatter,
+                CollectiveType::Gather,
+                CollectiveType::AllToAll,
             ],
         ));
 
@@ -229,9 +229,9 @@ impl BurstMiddleware {
                 sender_id: self.worker_id,
                 chunk_id,
                 last_chunk,
-                counter: counter,
+                counter,
                 collective: CollectiveType::Broadcast,
-                data: data.clone(),
+                data,
             };
 
             match tokio::join!(
@@ -274,7 +274,7 @@ impl BurstMiddleware {
                 sender_id: self.worker_id,
                 chunk_id: 0,
                 last_chunk: true,
-                counter: counter,
+                counter,
                 collective: CollectiveType::Gather,
                 data,
             });
@@ -355,36 +355,28 @@ impl BurstMiddleware {
             return Err("Data size must be equal to burst size".into());
         }
 
-        debug!("Worker {} sending all_to_all", self.worker_id);
         // first send to all workers
         futures::future::try_join_all(data.into_iter().enumerate().map(|(i, data)| {
             self.send_collective(i as u32, data, CollectiveType::AllToAll, counter)
         }))
         .await?;
 
-        debug!("Worker {} receiving all_to_all", self.worker_id);
-        //let message_count = Arc::new(AtomicU32::new(0));
-        // then receive from all workers
         let mut r = futures::future::try_join_all((0..self.options.burst_size).map(|from| {
             //let message_count = message_count.clone();
             async move {
-                let r = self
-                    .receive_message(from, &CollectiveType::AllToAll, counter)
-                    .await?;
-                //message_count.fetch_add(1, Ordering::Relaxed);
-                //let message_count = message_count.load(Ordering::Relaxed);
-                // debug!(
-                //     "Worker {} received {} all_to_all messages, remaining {}",
-                //     self.worker_id,
-                //     message_count,
-                //     self.options.burst_size - message_count
-                // );
+                let r = if let Some(msg) =
+                    self.get_message_collective(from, &CollectiveType::AllToAll, counter)
+                {
+                    msg
+                } else {
+                    self.receive_message(from, &CollectiveType::AllToAll, counter)
+                        .await?
+                };
                 Ok::<Message, Error>(r)
             }
         }))
         .await?;
 
-        debug!("Worker {} sorting all_to_all", self.worker_id);
         // Sort by sender_id
         r.sort_by_key(|msg| msg.sender_id);
 

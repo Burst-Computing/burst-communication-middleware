@@ -356,8 +356,10 @@ async fn send_redis<C>(mut connection: C, msg: &Message, key: &str) -> Result<()
 where
     C: ConnectionLike + Send,
 {
-    let data: Vec<(String, Vec<u8>)> = msg.clone().into_iter().collect::<Vec<_>>();
-    connection.xadd(key, "*", &data).await?;
+    let data: [&[u8]; 2] = msg.into();
+    connection
+        .xadd(key, "*", &[("h", data[0]), ("p", data[1])])
+        .await?;
     Ok(())
 }
 
@@ -372,9 +374,29 @@ where
             &StreamReadOptions::default().count(1).block(0),
         )
         .await?;
+
     let stream_key = r.keys.iter().next().unwrap();
     let last_id = stream_key.ids.iter().next().unwrap().id.clone();
-    let msg = Message::from(r);
+
+    let mut m = r
+        .keys
+        .into_iter()
+        .next()
+        .unwrap()
+        .ids
+        .into_iter()
+        .next()
+        .unwrap()
+        .map;
+    let header = match m.remove("h").unwrap() {
+        redis::Value::Data(d) => d,
+        _ => panic!("Expected header to be a redis::Value::Data"),
+    };
+    let payload = match m.remove("p").unwrap() {
+        redis::Value::Data(d) => d,
+        _ => panic!("Expected payload to be a redis::Value::Data"),
+    };
+    let msg = Message::from((header, payload));
     Ok((last_id, msg))
 }
 

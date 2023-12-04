@@ -1,0 +1,3 @@
+[submodule "burst-message-relay"]
+  path = burst-message-relay
+  url = git@github.com:CLOUDLAB-URV/burst-message-relay.git

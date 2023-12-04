@@ -22,6 +22,7 @@ aws-config = { version = "1.0.0", features = ["behavior-version-latest"] }
 aws-credential-types = { version = "1.0.0", features = [
     "hardcoded-credentials",
 ] }
+burst-message-relay = { path = "burst-message-relay" }
 
 [[example]]
 name = "hello_world"
