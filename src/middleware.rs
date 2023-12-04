@@ -288,7 +288,7 @@ impl BurstMiddleware {
             if sender_ids.len() != self.options.burst_size as usize {
                 let msgs = futures::future::try_join_all(
                     (0..self.options.burst_size)
-                        .filter(|id| !sender_ids.contains(id))
+                        .filter(|id| !sender_ids.contains(id) && *id != self.worker_id)
                         .map(|id| self.receive_message(id, &CollectiveType::Gather, counter)),
                 )
                 .await?;
