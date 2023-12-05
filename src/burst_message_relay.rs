@@ -26,6 +26,10 @@ impl BurstMessageRelayOptions {
     }
 
     impl_chainable_setter! {
+        server_uri, String
+    }
+
+    impl_chainable_setter! {
         config, ClientConfig
     }
 

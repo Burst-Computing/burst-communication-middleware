@@ -29,6 +29,10 @@ impl RedisOptions {
     }
 
     impl_chainable_setter! {
+        redis_uri, String
+    }
+
+    impl_chainable_setter! {
         direct_stream_prefix, String
     }
 

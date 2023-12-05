@@ -41,6 +41,10 @@ impl RabbitMQOptions {
     }
 
     impl_chainable_setter! {
+        rabbitmq_uri, String
+    }
+
+    impl_chainable_setter! {
         direct_exchange_prefix, String
     }
 
