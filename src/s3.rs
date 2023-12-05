@@ -92,7 +92,7 @@ impl SendReceiveFactory<S3Options> for S3Impl {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         s3_options: S3Options,
-        broadcast_proxy: Box<dyn BroadcastSendProxy>,
+        _broadcast_proxy: Box<dyn BroadcastSendProxy>,
     ) -> Result<(
         HashMap<u32, Box<dyn SendReceiveProxy>>,
         Box<dyn BroadcastSendProxy>,
@@ -181,9 +181,9 @@ pub struct S3ReceiveProxy {
 }
 
 pub struct S3BroadcastSendProxy {
-    s3_client: Client,
-    s3_options: Arc<S3Options>,
-    burst_options: Arc<BurstOptions>,
+    _s3_client: Client,
+    _s3_options: Arc<S3Options>,
+    _burst_options: Arc<BurstOptions>,
 }
 
 impl SendReceiveProxy for S3Proxy {}
@@ -375,16 +375,16 @@ impl S3BroadcastSendProxy {
         burst_options: Arc<BurstOptions>,
     ) -> Self {
         Self {
-            s3_client,
-            s3_options,
-            burst_options,
+            _s3_client: s3_client,
+            _s3_options: s3_options,
+            _burst_options: burst_options,
         }
     }
 }
 
 #[async_trait]
 impl BroadcastSendProxy for S3BroadcastSendProxy {
-    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
+    async fn broadcast_send(&self, _msg: &Message) -> Result<()> {
         unimplemented!()
     }
 }
