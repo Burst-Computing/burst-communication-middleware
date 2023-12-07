@@ -72,10 +72,7 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
             .await;
 
         for group_id in burst_options.group_ranges.keys() {
-            let group = burst_options.group_ranges.get(group_id).unwrap();
-            client
-                .create_bc_group(group_id.to_string(), &[*group.iter().next().unwrap()])
-                .await;
+            client.create_bc_group(group_id.to_string(), 1).await;
         }
 
         let current_group = burst_options
