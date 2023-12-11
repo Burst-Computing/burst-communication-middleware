@@ -347,7 +347,7 @@ impl ReceiveProxy for S3ReceiveProxy {
                     let msg = Message {
                         sender_id: sender_id,
                         chunk_id: 0,
-                        last_chunk: true,
+                        num_chunks: 1,
                         counter: 0,
                         collective: CollectiveType::Direct,
                         data: Bytes::from(bytes),

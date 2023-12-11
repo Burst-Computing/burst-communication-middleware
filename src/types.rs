@@ -1,6 +1,5 @@
-use std::fmt::{Debug, Display};
-
 use bytes::Bytes;
+use std::fmt::{Debug, Display};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -10,7 +9,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Message {
     pub sender_id: u32,
     pub chunk_id: u32,
-    pub last_chunk: bool,
+    pub num_chunks: u32,
     pub counter: u32,
     pub collective: CollectiveType,
     pub data: Bytes,
@@ -63,7 +62,7 @@ fn deserialize_header(header: &[u8]) -> Message {
     let mut msg = Message {
         sender_id: 0,
         chunk_id: 0,
-        last_chunk: false,
+        num_chunks: 1,
         counter: 0,
         collective: CollectiveType::Direct,
         data: Bytes::new(),
@@ -86,7 +85,7 @@ impl Debug for Message {
         f.debug_struct("Message")
             .field("sender_id", &self.sender_id)
             .field("chunk_id", &self.chunk_id)
-            .field("last_chunk", &self.last_chunk)
+            .field("num_chunks", &self.num_chunks)
             .field("counter", &self.counter)
             .field("collective", &self.collective)
             .field("data", &self.data.len())

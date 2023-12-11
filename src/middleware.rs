@@ -1,15 +1,13 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{atomic::AtomicU32, Arc},
-};
-
-use async_trait::async_trait;
-use bytes::Bytes;
-
 use crate::{
     counter::AtomicCounter,
     message_store::{MessageStore, MessageStoreHashMap},
     CollectiveType, Error, Message, Result,
+};
+use async_trait::async_trait;
+use bytes::Bytes;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{atomic::AtomicU32, Arc},
 };
 
 const ROOT_ID: u32 = 0;
@@ -166,6 +164,7 @@ impl BurstMiddleware {
         // create counters
         let counters = AtomicCounter::new(
             [
+                CollectiveType::Direct,
                 CollectiveType::Broadcast,
                 CollectiveType::Gather,
                 CollectiveType::Scatter,
@@ -199,18 +198,21 @@ impl BurstMiddleware {
     }
 
     pub async fn send(&self, dest: u32, data: Bytes) -> Result<()> {
-        self.send_collective(dest, data, CollectiveType::Direct, 0)
+        let counter = self.get_counter(&CollectiveType::Direct);
+        self.send_collective(dest, data, CollectiveType::Direct, counter)
             .await?;
+        self.increment_counter(&CollectiveType::Direct);
         Ok(())
     }
 
     pub async fn recv(&self, from: u32) -> Result<Message> {
         // If there is a message in the buffer, return it
-        if let Some(msg) = self.get_message_collective(from, &CollectiveType::Direct, 0) {
+        if let Some(msg) = self.get_any_message_collective(from, &CollectiveType::Direct) {
             return Ok(msg);
         }
 
-        self.receive_message(from, &CollectiveType::Direct, 0).await
+        self.receive_any_message(from, &CollectiveType::Direct)
+            .await
     }
 
     pub async fn broadcast(&self, data: Option<Bytes>) -> Result<Message> {
@@ -223,12 +225,12 @@ impl BurstMiddleware {
             }
             let data = data.unwrap();
             let chunk_id = 0;
-            let last_chunk = true;
+            let num_chunks = 1;
 
             let msg = Message {
                 sender_id: self.worker_id,
                 chunk_id,
-                last_chunk,
+                num_chunks,
                 counter,
                 collective: CollectiveType::Broadcast,
                 data,
@@ -273,7 +275,7 @@ impl BurstMiddleware {
             gathered.push(Message {
                 sender_id: self.worker_id,
                 chunk_id: 0,
-                last_chunk: true,
+                num_chunks: 1,
                 counter,
                 collective: CollectiveType::Gather,
                 data,
@@ -403,7 +405,7 @@ impl BurstMiddleware {
         counter: u32,
     ) -> Result<()> {
         let chunk_id = 0;
-        let last_chunk = true;
+        let num_chunks = 1;
 
         if dest >= self.options.burst_size {
             return Err("worker with id {} does not exist".into());
@@ -412,7 +414,7 @@ impl BurstMiddleware {
         let msg = Message {
             sender_id: self.worker_id,
             chunk_id,
-            last_chunk,
+            num_chunks,
             counter,
             collective,
             data,
@@ -424,9 +426,7 @@ impl BurstMiddleware {
             &self.remote_send_receive
         };
 
-        proxy.send(dest, &msg).await?;
-
-        Ok(())
+        proxy.send(dest, &msg).await
     }
 
     fn get_message_collective(
@@ -458,6 +458,14 @@ impl BurstMiddleware {
         result
     }
 
+    fn get_any_message_collective(
+        &self,
+        from: u32,
+        collective: &CollectiveType,
+    ) -> Option<Message> {
+        self.message_store.get_any(&from, collective)
+    }
+
     async fn receive_message(
         &self,
         from: u32,
@@ -472,6 +480,22 @@ impl BurstMiddleware {
             // receive blocking
             let msg = self.receive(from).await?;
             if msg.collective == *collective && msg.counter == counter {
+                return Ok(msg);
+            } else {
+                self.save_message(msg).await;
+            }
+        }
+    }
+
+    async fn receive_any_message(&self, from: u32, collective: &CollectiveType) -> Result<Message> {
+        if from >= self.options.burst_size {
+            return Err("worker with id {} does not exist".into());
+        }
+
+        loop {
+            // receive blocking
+            let msg = self.receive(from).await?;
+            if msg.collective == *collective {
                 return Ok(msg);
             } else {
                 self.save_message(msg).await;

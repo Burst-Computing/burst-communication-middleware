@@ -1,22 +1,34 @@
-use std::{collections::HashMap, sync::RwLock};
-
-use crate::types::{CollectiveType, Message};
+use crate::{
+    chunk_store::{ChunkStore, VecChunkStore},
+    types::{CollectiveType, Message},
+};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, RwLock},
+};
 
 /// Trait representing a message store.
 ///
-/// This trait is used to define the behavior of a message store, which is responsible for storing and retrieving messages.
-/// It is `Send` and `Sync`, meaning it can be safely sent and shared between multiple threads.
+/// This trait is used to define the behavior of a message store, which is responsible for storing
+/// and retrieving messages. It is [`Send`] and  [`Sync`], meaning it can be safely sent and shared
+/// between multiple threads.
 pub trait MessageStore: Send + Sync {
     /// Inserts a message into the message store.
+    ///
+    /// The message is inserted into the store based on the [`Message::sender_id`],
+    /// [`Message::collective`], and [`Message::counter`] fields.
+    ///
+    /// This method is thread-safe.
     ///
     /// # Arguments
     ///
     /// * `msg` - The message to be inserted.
-    ///
     fn insert(&self, msg: Message);
 
-    /// Retrieves messages from the `MessageStore` based on sender ID, collective type, and counter,
-    /// removing them from the store.
+    /// Retrieves and removes all messages that match the given criteria ([`Message::sender_id`],
+    /// [`Message::collective`], and [`Message::counter`]]).
+    ///
+    /// This method is thread-safe.
     ///
     /// # Arguments
     ///
@@ -26,27 +38,60 @@ pub trait MessageStore: Send + Sync {
     ///
     /// # Returns
     ///
-    /// A vector of messages that match the given criteria.
+    /// A [`Vec`] containing the retrieved messages.
     fn get(&self, sender_id: &u32, collective: &CollectiveType, counter: &u32) -> Vec<Message>;
+
+    /// Retrieves and removes all messages that match the given criteria ([`Message::sender_id`] and
+    /// [`Message::collective`]).
+    ///
+    /// This method is thread-safe.
+    ///
+    /// # Arguments
+    ///
+    /// * `sender_id` - The sender ID of the messages to retrieve.
+    /// * `collective` - The collective type of the messages to retrieve.
+    ///
+    /// # Returns
+    ///
+    /// A [`Vec`] containing the retrieved messages.
+    fn get_all(&self, sender_id: &u32, collective: &CollectiveType) -> Vec<Message>;
+
+    /// Retrieves and removes any message that matches the given criteria ([`Message::sender_id`],
+    /// and [`Message::collective`]).
+    ///
+    /// This method is thread-safe.
+    ///
+    /// # Arguments
+    ///
+    /// * `sender_id` - The sender ID of the messages to retrieve.
+    /// * `collective` - The collective type of the messages to retrieve.
+    ///
+    /// # Returns
+    ///
+    /// The retrieved message, if any.
+    fn get_any(&self, sender_id: &u32, collective: &CollectiveType) -> Option<Message>;
 }
 
-/// A `MessageStore` implementation that uses a `HashMap` to store messages.
+/// A [`MessageStore`] implementation that uses a [`HashMap`] and [`Vec`]s to store messages.
 #[derive(Debug)]
 pub struct MessageStoreHashMap {
     messages: HashMap<u32, HashMap<CollectiveType, RwLock<HashMap<u32, RwLock<Vec<Message>>>>>>,
 }
 
 impl MessageStoreHashMap {
-    /// Creates a new `MessageStore` with the given IDs and collective types.
+    /// Creates a new [`MessageStoreHashMap`] instance and initializes it with the given sender IDs
+    /// and collective types.
     ///
     /// # Arguments
     ///
-    /// * `ids` - An iterator of sender IDs.
-    /// * `collectives` - A set of collective types.
+    /// * `ids` - An [`Iterator`] over the [`Message::sender_id`] values to be used to initialize
+    ///          the message store.
+    /// * `collectives` - A slice containing the [`CollectiveType`] values to be used to initialize
+    ///                  the message store.
     ///
     /// # Returns
     ///
-    /// A new `MessageStore` instance.
+    /// A new [`MessageStoreHashMap`] instance.
     pub fn new(ids: impl Iterator<Item = u32>, collectives: &[CollectiveType]) -> Self {
         MessageStoreHashMap {
             messages: ids
@@ -74,7 +119,13 @@ impl MessageStore for MessageStoreHashMap {
             .unwrap();
         let read_by_counter = by_counter.read().unwrap();
         if let Some(vec) = read_by_counter.get(&msg.counter) {
-            vec.write().unwrap().push(msg);
+            let mut vec = vec.write().unwrap();
+            let i = vec.binary_search_by(|probe| probe.counter.cmp(&msg.counter));
+            if let Ok(i) = i {
+                vec.insert(i, msg);
+            } else {
+                vec.push(msg);
+            }
         } else {
             drop(read_by_counter);
             by_counter
@@ -103,5 +154,156 @@ impl MessageStore for MessageStoreHashMap {
         } else {
             Vec::new()
         }
+    }
+
+    fn get_all(&self, sender_id: &u32, collective: &CollectiveType) -> Vec<Message> {
+        let mut by_counter = self
+            .messages
+            .get(sender_id)
+            .unwrap()
+            .get(collective)
+            .unwrap()
+            .write()
+            .unwrap();
+
+        by_counter
+            .drain()
+            .filter_map(|(_, v)| {
+                let mut vec = v.write().unwrap();
+                if vec.is_empty() {
+                    None
+                } else {
+                    Some(vec.drain(..).collect::<Vec<_>>())
+                }
+            })
+            .flatten()
+            .collect()
+    }
+
+    fn get_any(&self, sender_id: &u32, collective: &CollectiveType) -> Option<Message> {
+        let by_counter = self
+            .messages
+            .get(sender_id)
+            .unwrap()
+            .get(collective)
+            .unwrap()
+            .read()
+            .unwrap();
+
+        by_counter
+            .keys()
+            .next()
+            .map(|k| by_counter.get(k))
+            .flatten()
+            .map(|v| v.write().unwrap())
+            .map(|mut vec| vec.pop())
+            .flatten()
+    }
+}
+
+/// A [`MessageStore`] implementation that uses a [`HashMap`] and [`ChunkStore`]s to store messages.
+pub struct MessageStoreChunked {
+    messages: HashMap<u32, HashMap<CollectiveType, Mutex<HashMap<u32, VecChunkStore>>>>,
+}
+
+impl MessageStoreChunked {
+    /// Creates a new [`MessageStoreChunked`] instance and initializes it with the given sender IDs
+    /// and collective types.
+    ///
+    /// # Arguments
+    ///
+    /// * `ids` - An [`Iterator`] over the [`Message::sender_id`] values to be used to initialize
+    ///          the message store.
+    /// * `collectives` - A slice containing the [`CollectiveType`] values to be used to initialize
+    ///
+    /// # Returns
+    ///
+    /// A new [`MessageStoreChunked`] instance.
+    pub fn new(ids: impl Iterator<Item = u32>, collectives: &[CollectiveType]) -> Self {
+        MessageStoreChunked {
+            messages: ids
+                .map(|id| {
+                    (
+                        id,
+                        collectives
+                            .iter()
+                            .map(|c| (*c, Mutex::new(HashMap::new())))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Inserts a message chunk into the message store.
+    ///
+    /// The message is inserted into the store based on the [`Message::sender_id`],
+    /// [`Message::collective`], and [`Message::counter`] fields.
+    ///
+    /// This method is thread-safe.
+    ///
+    /// # Arguments
+    ///
+    /// * `header` - The message header.
+    /// * `data` - The message chunk data.
+    pub fn insert(&self, header: Message, data: Vec<u8>) {
+        let chunk_id = header.chunk_id;
+
+        let mut by_counter_write = self
+            .messages
+            .get(&header.sender_id)
+            .unwrap()
+            .get(&header.collective)
+            .unwrap()
+            .lock()
+            .unwrap();
+
+        if let Some(chunk_store) = by_counter_write.get_mut(&header.counter) {
+            chunk_store.insert(chunk_id, data);
+        } else {
+            let counter = header.counter;
+            let mut chunk_store = VecChunkStore::new(header.num_chunks, header);
+            chunk_store.insert(chunk_id, data);
+            by_counter_write.insert(counter, chunk_store);
+        }
+    }
+
+    /// Retrieves and removes the complete message that matches the given criteria
+    /// ([`Message::sender_id`], [`Message::collective`], and [`Message::counter`]]).
+    ///
+    /// This method is thread-safe.
+    ///
+    /// # Arguments
+    ///
+    /// * `sender_id` - The sender ID of the message to retrieve.
+    /// * `collective` - The collective type of the message to retrieve.
+    /// * `counter` - The counter value of the message to retrieve.
+    ///
+    /// # Returns
+    ///
+    /// The retrieved message, if any.
+    pub fn get(
+        &self,
+        sender_id: &u32,
+        collective: &CollectiveType,
+        counter: &u32,
+    ) -> Option<Message> {
+        let mut by_counter_write = self
+            .messages
+            .get(sender_id)
+            .unwrap()
+            .get(collective)
+            .unwrap()
+            .lock()
+            .unwrap();
+
+        if let Some(chunk_store) = by_counter_write.remove(counter) {
+            if chunk_store.is_complete() {
+                return Some(chunk_store.get_complete_message());
+            } else {
+                by_counter_write.insert(*counter, chunk_store);
+            }
+        }
+        None
     }
 }
