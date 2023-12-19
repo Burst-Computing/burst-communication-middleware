@@ -6,7 +6,7 @@ use bytes::Bytes;
 use log::{error, info};
 use std::{
     collections::{HashMap, HashSet},
-    thread,
+    env, thread,
 };
 
 #[tokio::main]
@@ -20,7 +20,7 @@ async fn main() {
         .into_iter()
         .collect::<HashMap<String, HashSet<u32>>>();
 
-    let mut p1 = match BurstMiddleware::create_proxies::<TokioChannelImpl, S3Impl, _, _>(
+    let p1 = match BurstMiddleware::create_proxies::<TokioChannelImpl, S3Impl, _, _>(
         BurstOptions::new("hello_world".to_string(), 2, group_0, 0.to_string()),
         TokioChannelOptions::new()
             .broadcast_channel_size(256)
@@ -29,11 +29,11 @@ async fn main() {
         //     .durable_queues(true)
         //     .ack(true)
         //     .build(),
-        S3Options::new("aitor-burst-middleware".to_string())
-            .access_key_id("".to_string())
-            .secret_access_key("".to_string())
-            .session_token(Some("".to_string()))
-            .region("us-east-1".to_string())
+        S3Options::new(env::var("S3_BUCKET").unwrap())
+            .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
+            .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
+            .session_token(Some(env::var("AWS_SESSION_TOKEN").unwrap()))
+            .region(env::var("S3_REGION").unwrap())
             .endpoint(None)
             .build(),
     )
@@ -48,7 +48,7 @@ async fn main() {
     .remove(&0)
     .unwrap();
 
-    let mut p2 = match BurstMiddleware::create_proxies::<TokioChannelImpl, S3Impl, _, _>(
+    let p2 = match BurstMiddleware::create_proxies::<TokioChannelImpl, S3Impl, _, _>(
         BurstOptions::new("hello_world".to_string(), 2, group_1, 1.to_string()),
         TokioChannelOptions::new()
             .broadcast_channel_size(256)
@@ -57,11 +57,11 @@ async fn main() {
         //     .durable_queues(true)
         //     .ack(true)
         //     .build(),
-        S3Options::new("aitor-burst-middleware".to_string())
-            .access_key_id("".to_string())
-            .secret_access_key("".to_string())
-            .session_token(Some("".to_string()))
-            .region("us-east-1".to_string())
+        S3Options::new(env::var("S3_BUCKET").unwrap())
+            .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
+            .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
+            .session_token(Some(env::var("AWS_SESSION_TOKEN").unwrap()))
+            .region(env::var("S3_REGION").unwrap())
             .endpoint(None)
             .build(),
     )

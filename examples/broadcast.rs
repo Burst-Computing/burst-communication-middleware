@@ -1,12 +1,12 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, Message, RabbitMQMImpl, RabbitMQOptions, TokioChannelImpl,
-    TokioChannelOptions,
+    BurstMiddleware, BurstOptions, Message, RabbitMQMImpl, RabbitMQOptions, S3Impl, S3Options,
+    TokioChannelImpl, TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
 use std::{
     collections::{HashMap, HashSet},
-    thread,
+    env, thread,
 };
 
 const BURST_SIZE: u32 = 64;
@@ -44,13 +44,35 @@ async fn main() {
             .broadcast_channel_size(256)
             .build();
 
-        let rabbitmq_options =
-            RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-                .durable_queues(true)
-                .ack(true)
-                .build();
+        // let rabbitmq_options =
+        //     RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+        //         .durable_queues(true)
+        //         .ack(true)
+        //         .build();
+        let s3_options = S3Options::new(env::var("S3_BUCKET").unwrap())
+            .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
+            .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
+            .session_token(Some(env::var("AWS_SESSION_TOKEN").unwrap()))
+            .region(env::var("S3_REGION").unwrap())
+            .endpoint(None)
+            .enable_broadcast(true)
+            .build();
 
-        let group_threads = group(burst_options, channel_options, rabbitmq_options).await;
+        let proxies = match BurstMiddleware::create_proxies::<TokioChannelImpl, S3Impl, _, _>(
+            burst_options,
+            channel_options,
+            s3_options,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                error!("{:?}", e);
+                panic!();
+            }
+        };
+
+        let group_threads = group(proxies).await;
         threads.extend(group_threads);
     }
 
@@ -59,25 +81,7 @@ async fn main() {
     }
 }
 
-async fn group(
-    burst_options: BurstOptions,
-    channel_options: TokioChannelOptions,
-    rabbitmq_options: RabbitMQOptions,
-) -> Vec<std::thread::JoinHandle<()>> {
-    let proxies = match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
-        burst_options,
-        channel_options,
-        rabbitmq_options,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            error!("{:?}", e);
-            panic!();
-        }
-    };
-
+async fn group(proxies: HashMap<u32, BurstMiddleware>) -> Vec<std::thread::JoinHandle<()>> {
     let mut threads = Vec::with_capacity(proxies.len());
     for (worker_id, proxy) in proxies {
         let thread = thread::spawn(move || {
