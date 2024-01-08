@@ -154,7 +154,7 @@ impl SendReceiveFactory<S3Options> for S3Impl {
 
         for worker_id in current_group {
             let p = S3Proxy::new(
-                s3_client.clone(),
+                Client::new(&config),
                 s3_options.clone(),
                 burst_options.clone(),
                 *worker_id,
@@ -163,7 +163,6 @@ impl SendReceiveFactory<S3Options> for S3Impl {
         }
 
         if s3_options.enable_broadcast {
-            let s3 = s3_client.clone();
             let burst_id = burst_options.burst_id.clone();
             let bucket = s3_options.bucket.clone();
             let wait_time = s3_options.wait_time.clone();
@@ -171,7 +170,7 @@ impl SendReceiveFactory<S3Options> for S3Impl {
                 let mut received_messages: HashSet<String> = HashSet::new();
                 loop {
                     log::debug!("Listing broadcast keys...");
-                    let list_response = s3
+                    let list_response = s3_client
                         .list_objects_v2()
                         .bucket(bucket.clone())
                         .prefix(format!("{}/broadcast/", burst_id))
@@ -198,7 +197,7 @@ impl SendReceiveFactory<S3Options> for S3Impl {
                     log::debug!("Found {} new keys for broadcast", new_keys.len());
 
                     for new_key in new_keys {
-                        let obj = s3
+                        let obj = s3_client
                             .get_object()
                             .bucket(bucket.clone())
                             .key(new_key.clone())
@@ -274,7 +273,7 @@ impl SendReceiveFactory<S3Options> for S3Impl {
         Ok((
             hmap,
             Box::new(S3BroadcastSendProxy::new(
-                s3_client,
+                Client::new(&config),
                 s3_options,
                 burst_options,
             )),
