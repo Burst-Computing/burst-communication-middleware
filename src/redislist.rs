@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, vec};
+use std::{collections::HashMap, fmt::format, sync::Arc, vec};
 
 use async_trait::async_trait;
 
@@ -74,26 +74,31 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
 
         // spawn task to receive broadcast messages and send them to the broadcast proxy
         let mut broadcast_connection = client.get_async_connection().await?;
-        let mut pubsub = client.get_async_connection().await?.into_pubsub();
-        let broadcast_stream = get_broadcast_topic(
+        let broadcast_list = get_broadcast_list_key(
             &redis_options.broadcast_topic_prefix,
             &burst_options.burst_id,
             &burst_options.group_id,
         );
         tokio::spawn(async move {
-            // subscribe to a redis pubsub topic
-            pubsub.subscribe(&broadcast_stream).await.unwrap();
-            let mut stream = pubsub.on_message();
             loop {
                 // wait for the next message containing the broadcast key
                 log::debug!("waiting for broadcast message");
-                let msg = stream.next().await.unwrap();
-                let bcast_key: String = msg.get_payload().unwrap();
+                let (_, bcast_key): (String, String) = broadcast_connection
+                    .blpop(&broadcast_list, 0)
+                    .await
+                    .unwrap();
                 log::debug!("received broadcast message with key {:?}", bcast_key);
 
                 // get the message from redis using GET and send it to the broadcast proxy
-                let res: Vec<u8> = broadcast_connection.get(bcast_key).await.unwrap();
-                let msg = Message::from(res);
+                let header: Vec<u8> = broadcast_connection
+                    .get(format!("{}-header", bcast_key))
+                    .await
+                    .unwrap();
+                let payload: Vec<u8> = broadcast_connection
+                    .get(format!("{}-payload", bcast_key))
+                    .await
+                    .unwrap();
+                let msg = Message::from((header, payload));
                 broadcast_proxy.broadcast_send(&msg).await.unwrap();
             }
         });
@@ -276,24 +281,19 @@ impl BroadcastSendProxy for RedisListBroadcastSendProxy {
     async fn broadcast_send(&self, msg: &Message) -> Result<()> {
         let mut con = self.connection.clone();
 
-        let key = format!(
+        let bcast_key = format!(
             "{}:broadcast:{}",
             self.burst_options.burst_id,
             uuid::Uuid::new_v4().to_string()
         );
-        let payload: [&[u8]; 2] = msg.into();
-        con.set_ex(key.clone(), &payload, 6300).await?;
+        let [header, payload]: [&[u8]; 2] = msg.into();
+        log::debug!("sending message: {:?}", payload);
+        con.set(format!("{}-header", bcast_key), &header).await?;
+        con.set(format!("{}-payload", bcast_key), &payload).await?;
 
         if msg.collective != CollectiveType::Broadcast {
             return Err("Cannot send non-broadcast message to broadcast".into());
         }
-
-        let topic = get_broadcast_topic(
-            &self.redis_options.broadcast_topic_prefix,
-            &self.burst_options.burst_id,
-            &self.burst_options.group_id,
-        );
-        con.publish(topic, key.clone()).await?;
 
         futures::future::try_join_all(
             self.burst_options
@@ -301,27 +301,18 @@ impl BroadcastSendProxy for RedisListBroadcastSendProxy {
                 .keys()
                 .filter(|dest| **dest != self.burst_options.group_id)
                 .map(|dest| {
-                    let c = self.connection.clone();
-                    let topic = get_broadcast_topic(
+                    get_broadcast_list_key(
                         &self.redis_options.broadcast_topic_prefix,
                         &self.burst_options.burst_id,
                         dest,
-                    );
-                    publish_redis(c, topic, &key)
-                }),
+                    )
+                })
+                .map(|key| send_broadcast(con.clone(), key, &bcast_key)),
         )
         .await?;
 
         Ok(())
     }
-}
-
-async fn publish_redis<C>(mut connection: C, topic: String, value: &String) -> Result<()>
-where
-    C: ConnectionLike + Send,
-{
-    connection.publish(topic, value).await?;
-    Ok(())
 }
 
 async fn send_direct<C>(
@@ -337,7 +328,7 @@ where
     Ok(send_redis(
         connection,
         msg,
-        &get_redis_list_key(
+        get_redis_list_key(
             &redis_options.list_key_prefix,
             &burst_options.burst_id,
             dest,
@@ -346,7 +337,15 @@ where
     .await?)
 }
 
-async fn send_redis<C>(mut connection: C, msg: &Message, key: &str) -> Result<()>
+async fn send_broadcast<C>(mut connection: C, topic: String, key: &String) -> Result<()>
+where
+    C: ConnectionLike + Send,
+{
+    connection.rpush(topic, key).await?;
+    Ok(())
+}
+
+async fn send_redis<C>(mut connection: C, msg: &Message, key: String) -> Result<()>
 where
     C: ConnectionLike + Send,
 {
@@ -372,6 +371,6 @@ fn get_redis_list_key(prefix: &str, burst_id: &str, worker_id: u32) -> String {
     format!("{}:{}:worker_{}", prefix, burst_id, worker_id)
 }
 
-fn get_broadcast_topic(prefix: &str, burst_id: &str, group_id: &str) -> String {
+fn get_broadcast_list_key(prefix: &str, burst_id: &str, group_id: &str) -> String {
     format!("{}:{}:group_{}", prefix, burst_id, group_id)
 }
