@@ -70,10 +70,10 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
         Box<dyn BroadcastSendProxy>,
     )> {
         let redis_options = Arc::new(redis_options);
-        let client = Client::open(redis_options.redis_uri.clone())?;
 
         // spawn task to receive broadcast messages and send them to the broadcast proxy
-        let mut broadcast_connection = client.get_async_connection().await?;
+        let broascast_client = Client::open(redis_options.redis_uri.clone())?;
+        let mut broadcast_connection = broascast_client.get_async_connection().await?;
         let broadcast_list = get_broadcast_list_key(
             &redis_options.broadcast_topic_prefix,
             &burst_options.burst_id,
@@ -111,10 +111,10 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
         let mut hmap = HashMap::new();
 
         futures::future::try_join_all(current_group.iter().map(|worker_id| {
-            let c = client.clone();
+            let c = Client::open(redis_options.redis_uri.clone()).unwrap();
             let r = redis_options.clone();
             let b = burst_options.clone();
-            async move { RedisListProxy::new(c.clone(), r.clone(), b.clone(), *worker_id).await }
+            async move { RedisListProxy::new(c, r.clone(), b.clone(), *worker_id).await }
         }))
         .await?
         .into_iter()
@@ -128,7 +128,7 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
         Ok((
             hmap,
             Box::new(RedisListBroadcastSendProxy::new(
-                client.get_multiplexed_async_connection().await?,
+                broascast_client.get_multiplexed_async_connection().await?,
                 redis_options,
                 burst_options,
             )) as Box<dyn BroadcastSendProxy>,
