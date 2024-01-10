@@ -121,12 +121,11 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
         HashMap<u32, Box<dyn SendReceiveProxy>>,
         Box<dyn BroadcastSendProxy>,
     )> {
-        let connection = Arc::new(
-            Connection::connect(&rabbitmq_options.rabbitmq_uri, Default::default()).await?,
-        );
+        let connection =
+            Connection::connect(&rabbitmq_options.rabbitmq_uri, Default::default()).await?;
         let rabbitmq_options = Arc::new(rabbitmq_options);
         init_rabbit(
-            connection.clone(),
+            connection,
             burst_options.clone(),
             rabbitmq_options.clone(),
             broadcast_proxy,
@@ -141,10 +140,10 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
         let mut hmap = HashMap::new();
 
         futures::future::try_join_all(current_group.iter().map(|worker_id| {
-            let c = connection.clone();
+            // let c = connection.clone();
             let r = rabbitmq_options.clone();
             let b = burst_options.clone();
-            async move { RabbitMQProxy::new(c.clone(), r.clone(), b.clone(), *worker_id).await }
+            async move { RabbitMQProxy::new(r, b, *worker_id).await }
         }))
         .await?
         .into_iter()
@@ -157,16 +156,14 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
 
         Ok((
             hmap,
-            Box::new(
-                RabbitMQBroadcastSendProxy::new(connection, rabbitmq_options, burst_options)
-                    .await?,
-            ) as Box<dyn BroadcastSendProxy>,
+            Box::new(RabbitMQBroadcastSendProxy::new(rabbitmq_options, burst_options).await?)
+                as Box<dyn BroadcastSendProxy>,
         ))
     }
 }
 
 async fn init_rabbit(
-    connection: Arc<Connection>,
+    connection: Connection,
     burst_options: Arc<BurstOptions>,
     rabbitmq_options: Arc<RabbitMQOptions>,
     broadcast_proxy: Box<dyn BroadcastSendProxy>,
@@ -384,11 +381,13 @@ impl ReceiveProxy for RabbitMQProxy {
 
 impl RabbitMQProxy {
     pub async fn new(
-        connection: Arc<Connection>,
         rabbitmq_options: Arc<RabbitMQOptions>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
     ) -> Result<Self> {
+        let connection = Arc::new(
+            Connection::connect(&rabbitmq_options.rabbitmq_uri, Default::default()).await?,
+        );
         Ok(Self {
             worker_id,
             sender: Box::new(
@@ -459,10 +458,11 @@ impl ReceiveProxy for RabbitMQReceiveProxy {
 
 impl RabbitMQBroadcastSendProxy {
     pub async fn new(
-        connection: Arc<Connection>,
         rabbitmq_options: Arc<RabbitMQOptions>,
         burst_options: Arc<BurstOptions>,
     ) -> Result<Self> {
+        let connection =
+            Connection::connect(&rabbitmq_options.rabbitmq_uri, Default::default()).await?;
         let channel = create_rabbit_channel(&connection, &rabbitmq_options).await?;
         Ok(Self {
             channel,

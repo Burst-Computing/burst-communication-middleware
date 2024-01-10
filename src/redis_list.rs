@@ -80,14 +80,15 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
             &burst_options.group_id,
         );
         tokio::spawn(async move {
+            log::debug!("starting broadcast receiver");
             loop {
                 // wait for the next message containing the broadcast key
-                log::debug!("waiting for broadcast message");
+                // log::debug!("waiting for broadcast message");
                 let (_, bcast_key): (String, String) = broadcast_connection
                     .blpop(&broadcast_list, 0)
                     .await
                     .unwrap();
-                log::debug!("received broadcast message with key {:?}", bcast_key);
+                // log::debug!("received broadcast message with key {:?}", bcast_key);
 
                 // get the message from redis using GET and send it to the broadcast proxy
                 let header: Vec<u8> = broadcast_connection

@@ -1,6 +1,6 @@
 use burst_communication_middleware::{
     BurstMiddleware, BurstOptions, Message, RabbitMQMImpl, RabbitMQOptions, RedisListImpl,
-    RedisListOptions, RedisOptions, S3Impl, S3Options, TokioChannelImpl, TokioChannelOptions,
+    RedisListOptions, RedisStreamOptions, S3Impl, S3Options, TokioChannelImpl, TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
