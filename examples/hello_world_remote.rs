@@ -20,15 +20,15 @@ async fn main() {
         .into_iter()
         .collect::<HashMap<String, HashSet<u32>>>();
 
-    let p1 = match BurstMiddleware::create_proxies::<TokioChannelImpl, RedisListImpl, _, _>(
+    let p1 = match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
         BurstOptions::new("hello_world".to_string(), 2, group_0, 0.to_string()),
         TokioChannelOptions::new()
             .broadcast_channel_size(256)
             .build(),
-        // RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-        //     .durable_queues(true)
-        //     .ack(true)
-        //     .build(),
+        RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+            .durable_queues(true)
+            .ack(true)
+            .build(),
         // S3Options::new(env::var("S3_BUCKET").unwrap())
         //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
         //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
@@ -36,7 +36,7 @@ async fn main() {
         //     .region(env::var("S3_REGION").unwrap())
         //     .endpoint(None)
         //     .build(),
-        RedisListOptions::new("redis://127.0.0.1".to_string()),
+        // RedisListOptions::new("redis://127.0.0.1".to_string()),
     )
     .await
     {
@@ -49,15 +49,15 @@ async fn main() {
     .remove(&0)
     .unwrap();
 
-    let p2 = match BurstMiddleware::create_proxies::<TokioChannelImpl, RedisListImpl, _, _>(
+    let p2 = match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
         BurstOptions::new("hello_world".to_string(), 2, group_1, 1.to_string()),
         TokioChannelOptions::new()
             .broadcast_channel_size(256)
             .build(),
-        // RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-        //     .durable_queues(true)
-        //     .ack(true)
-        //     .build(),
+        RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+            .durable_queues(true)
+            .ack(true)
+            .build(),
         // S3Options::new(env::var("S3_BUCKET").unwrap())
         //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
         //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
@@ -65,7 +65,7 @@ async fn main() {
         //     .region(env::var("S3_REGION").unwrap())
         //     .endpoint(None)
         //     .build(),
-        RedisListOptions::new("redis://127.0.0.1".to_string()),
+        // RedisListOptions::new("redis://127.0.0.1".to_string()),
     )
     .await
     {

@@ -1,14 +1,11 @@
-use std::{collections::HashMap, fmt::format, sync::Arc, vec};
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 
-use bytes::Bytes;
-use futures::StreamExt;
 use redis::{
     aio::{ConnectionLike, MultiplexedConnection},
-    AsyncCommands, Client, FromRedisValue,
+    AsyncCommands, Client,
 };
-use tracing::Value;
 
 use crate::{
     impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
