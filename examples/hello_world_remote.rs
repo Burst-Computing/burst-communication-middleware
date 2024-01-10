@@ -36,7 +36,7 @@ async fn main() {
         //     .region(env::var("S3_REGION").unwrap())
         //     .endpoint(None)
         //     .build(),
-        RedisListOptions::new(vec!["redis://127.0.0.1".to_string()]),
+        RedisListOptions::new("redis://127.0.0.1".to_string()),
     )
     .await
     {
@@ -65,7 +65,7 @@ async fn main() {
         //     .region(env::var("S3_REGION").unwrap())
         //     .endpoint(None)
         //     .build(),
-        RedisListOptions::new(vec!["redis://127.0.0.1".to_string()]),
+        RedisListOptions::new("redis://127.0.0.1".to_string()),
     )
     .await
     {

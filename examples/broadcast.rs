@@ -57,8 +57,7 @@ async fn main() {
         //     .endpoint(None)
         //     .enable_broadcast(true)
         //     .build();
-        let redislist_options =
-            RedisListOptions::new(vec!["redis://127.0.0.1".to_string()]).build();
+        let redislist_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
 
         let proxies =
             match BurstMiddleware::create_proxies::<TokioChannelImpl, RedisListImpl, _, _>(

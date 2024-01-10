@@ -1,6 +1,6 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, RabbitMQMImpl, RabbitMQOptions, TokioChannelImpl,
-    TokioChannelOptions,
+    BurstMiddleware, BurstOptions, RabbitMQMImpl, RabbitMQOptions, RedisListImpl, RedisListOptions,
+    TokioChannelImpl, TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -44,13 +44,14 @@ async fn main() {
         let channel_options = TokioChannelOptions::new()
             .broadcast_channel_size(256)
             .build();
-        let rabbitmq_options =
-            RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-                .durable_queues(true)
-                .ack(true)
-                .build();
+        // let rabbitmq_options =
+        //     RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+        //         .durable_queues(true)
+        //         .ack(true)
+        //         .build();
+        let redislist_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
 
-        let group_threads = group(burst_options, channel_options, rabbitmq_options).await;
+        let group_threads = group(burst_options, channel_options, redislist_options).await;
         threads.extend(group_threads);
     }
 
@@ -62,9 +63,9 @@ async fn main() {
 async fn group<'a>(
     burst_options: BurstOptions,
     channel_options: TokioChannelOptions,
-    rabbitmq_options: RabbitMQOptions,
+    rabbitmq_options: RedisListOptions,
 ) -> Vec<std::thread::JoinHandle<()>> {
-    let proxies = match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
+    let proxies = match BurstMiddleware::create_proxies::<TokioChannelImpl, RedisListImpl, _, _>(
         burst_options,
         channel_options,
         rabbitmq_options,
@@ -133,7 +134,7 @@ pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std
                 burst_middleware.info().worker_id
             );
             let payload = Bytes::from(message);
-            sleep(Duration::from_secs(1)).await;
+            // sleep(Duration::from_secs(1)).await;
             match burst_middleware.send(0, payload).await {
                 Ok(_) => {}
                 Err(e) => {

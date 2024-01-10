@@ -17,21 +17,21 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct RedisListOptions {
-    pub redis_hosts: Vec<String>,
+    pub redis_uri: String,
     pub list_key_prefix: String,
     pub broadcast_topic_prefix: String,
 }
 
 impl RedisListOptions {
-    pub fn new(redis_hosts: Vec<String>) -> Self {
+    pub fn new(redis_uri: String) -> Self {
         Self {
-            redis_hosts,
+            redis_uri,
             ..Default::default()
         }
     }
 
     impl_chainable_setter! {
-        redis_hosts, Vec<String>
+        redis_uri, String
     }
 
     impl_chainable_setter! {
@@ -50,7 +50,7 @@ impl RedisListOptions {
 impl Default for RedisListOptions {
     fn default() -> Self {
         Self {
-            redis_hosts: vec!["redis://localhost:6379".to_string()],
+            redis_uri: "redis://localhost:6379".to_string(),
             list_key_prefix: "direct_stream".into(),
             broadcast_topic_prefix: "broadcast_stream".into(),
         }
@@ -70,7 +70,7 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
         Box<dyn BroadcastSendProxy>,
     )> {
         let redis_options = Arc::new(redis_options);
-        let client = Client::open(redis_options.redis_hosts[0].clone())?;
+        let client = Client::open(redis_options.redis_uri.clone())?;
 
         // spawn task to receive broadcast messages and send them to the broadcast proxy
         let mut broadcast_connection = client.get_async_connection().await?;
