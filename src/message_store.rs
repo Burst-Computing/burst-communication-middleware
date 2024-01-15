@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 use crate::{
     chunk_store::{ChunkStore, VecChunkStore},
     types::{CollectiveType, Message},
@@ -234,7 +236,9 @@ impl MessageStoreChunked {
                 .collect(),
         }
     }
+}
 
+impl MessageStoreChunked {
     /// Inserts a message chunk into the message store.
     ///
     /// The message is inserted into the store based on the [`Message::sender_id`],
@@ -246,24 +250,24 @@ impl MessageStoreChunked {
     ///
     /// * `header` - The message header.
     /// * `data` - The message chunk data.
-    pub fn insert(&self, header: Message, data: Vec<u8>) {
-        let chunk_id = header.chunk_id;
+    pub fn insert(&self, msg: Message) {
+        let chunk_id = msg.chunk_id;
 
         let mut by_counter_write = self
             .messages
-            .get(&header.sender_id)
+            .get(&msg.sender_id)
             .unwrap()
-            .get(&header.collective)
+            .get(&msg.collective)
             .unwrap()
             .lock()
             .unwrap();
 
-        if let Some(chunk_store) = by_counter_write.get_mut(&header.counter) {
-            chunk_store.insert(chunk_id, data);
+        if let Some(chunk_store) = by_counter_write.get_mut(&msg.counter) {
+            chunk_store.insert(chunk_id, msg.data);
         } else {
-            let counter = header.counter;
-            let mut chunk_store = VecChunkStore::new(header.num_chunks, header);
-            chunk_store.insert(chunk_id, data);
+            let counter = msg.counter;
+            let mut chunk_store = VecChunkStore::new(msg.num_chunks);
+            chunk_store.insert(chunk_id, msg.data);
             by_counter_write.insert(counter, chunk_store);
         }
     }
@@ -297,13 +301,64 @@ impl MessageStoreChunked {
             .lock()
             .unwrap();
 
-        if let Some(chunk_store) = by_counter_write.remove(counter) {
-            if chunk_store.is_complete() {
-                return Some(chunk_store.get_complete_message());
-            } else {
-                by_counter_write.insert(*counter, chunk_store);
-            }
+        let is_complete = match by_counter_write.get(counter) {
+            Some(chunk_store) => chunk_store.is_complete(),
+            None => false,
+        };
+
+        if is_complete {
+            let chunk_store = by_counter_write.remove(counter).unwrap();
+            let body = chunk_store.get_complete_payload();
+            return Some(Message {
+                sender_id: *sender_id,
+                chunk_id: 0,
+                num_chunks: 1,
+                counter: *counter,
+                collective: *collective,
+                data: body,
+            });
+        } else {
+            return None;
         }
-        None
+    }
+
+    pub fn get_any(&self, sender_id: &u32, collective: &CollectiveType) -> Option<Message> {
+        let mut by_counter = self
+            .messages
+            .get(sender_id)
+            .unwrap()
+            .get(collective)
+            .unwrap()
+            .lock()
+            .unwrap();
+
+        let mut complete_counter: Option<u32> = None;
+        for counter in by_counter.keys() {
+            match by_counter.get(counter) {
+                Some(chunk_store) => {
+                    if chunk_store.is_complete() {
+                        complete_counter = Some(*counter);
+                        break;
+                    }
+                }
+                None => continue,
+            };
+        }
+
+        match complete_counter {
+            Some(counter) => {
+                let chunk_store = by_counter.remove(&counter).unwrap();
+                let body = chunk_store.get_complete_payload();
+                return Some(Message {
+                    sender_id: *sender_id,
+                    chunk_id: 0,
+                    num_chunks: 1,
+                    counter: counter,
+                    collective: *collective,
+                    data: body,
+                });
+            }
+            None => return None,
+        }
     }
 }

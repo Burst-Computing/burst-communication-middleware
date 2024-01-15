@@ -38,6 +38,8 @@ async fn main() {
             BURST_SIZE,
             group_ranges.clone(),
             group_id.to_string(),
+            true,
+            4 * 1024 * 1024,
         );
 
         let channel_options = TokioChannelOptions::new()

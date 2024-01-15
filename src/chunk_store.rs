@@ -12,7 +12,7 @@ pub trait ChunkStore {
     ///
     /// * `chunk_id` - The ID of the chunk.
     /// * `chunk` - The chunk data.
-    fn insert(&mut self, chunk_id: u32, chunk: Vec<u8>);
+    fn insert(&mut self, chunk_id: u32, chunk: Bytes);
 
     /// Checks if all the chunks have been received.
     ///
@@ -30,14 +30,13 @@ pub trait ChunkStore {
     /// # Panics
     ///
     /// Panics if the message is not complete.
-    fn get_complete_message(self) -> Message;
+    fn get_complete_payload(self) -> Bytes;
 }
 
 /// A [`ChunkStore`] implementation that stores the chunks in a [`Vec`].
 #[derive(Debug)]
 pub struct VecChunkStore {
-    msg_header: Message,
-    array: Vec<Vec<u8>>,
+    array: Vec<Bytes>,
     num_chunks: u32,
     num_chunks_received: u32,
     is_complete: bool,
@@ -54,10 +53,9 @@ impl VecChunkStore {
     /// # Returns
     ///
     /// A new `ChunkStore` instance.
-    pub fn new(num_chunks: u32, msg_header: Message) -> Self {
+    pub fn new(num_chunks: u32) -> Self {
         Self {
-            msg_header,
-            array: vec![Vec::new(); num_chunks as usize],
+            array: vec![Vec::new().into(); num_chunks as usize],
             num_chunks,
             num_chunks_received: 0,
             is_complete: false,
@@ -66,7 +64,7 @@ impl VecChunkStore {
 }
 
 impl ChunkStore for VecChunkStore {
-    fn insert(&mut self, chunk_id: u32, chunk: Vec<u8>) {
+    fn insert(&mut self, chunk_id: u32, chunk: Bytes) {
         self.array[chunk_id as usize] = chunk;
         self.num_chunks_received += 1;
         if self.num_chunks_received > self.num_chunks {
@@ -80,15 +78,13 @@ impl ChunkStore for VecChunkStore {
         self.is_complete
     }
 
-    fn get_complete_message(self) -> Message {
+    fn get_complete_payload(self) -> Bytes {
         assert!(self.is_complete(), "Message is not complete");
-        let data = combine_chunks(self.array);
-        Message {
-            data,
-            num_chunks: 1,
-            chunk_id: 0,
-            ..self.msg_header
+        let mut data = BytesMut::with_capacity(self.array.iter().map(|x| x.len()).sum());
+        for chunk in self.array {
+            data.extend_from_slice(&chunk);
         }
+        data.freeze()
     }
 }
 
@@ -136,21 +132,4 @@ pub fn chunk_data(mut data: Bytes, max_chunk_size: usize) -> Vec<Bytes> {
         chunks.push(chunk);
     }
     chunks
-}
-
-/// Combines multiple chunks into a single data.
-///
-/// # Arguments
-///
-/// * `chunks` - The chunks to be combined.
-///
-/// # Returns
-///
-/// The combined data.
-pub fn combine_chunks(chunks: Vec<Vec<u8>>) -> Bytes {
-    let mut data = BytesMut::with_capacity(chunks.iter().map(|x| x.len()).sum());
-    for chunk in chunks {
-        data.extend_from_slice(&chunk);
-    }
-    data.freeze()
 }

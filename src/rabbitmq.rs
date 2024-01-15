@@ -18,6 +18,7 @@ use lapin::{
     BasicProperties, Channel, Connection, ExchangeKind,
 };
 use log::{debug, error};
+use redis::FromRedisValue;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{
     mpsc::{self, UnboundedReceiver},
@@ -325,13 +326,23 @@ async fn init_rabbit(
                 .or_insert_with(|| HashMap::new());
             let mut chunks = by_counter
                 .remove(&counter)
-                .unwrap_or_else(|| VecChunkStore::new(header.num_chunks, header));
+                .unwrap_or_else(|| VecChunkStore::new(header.num_chunks));
 
-            chunks.insert(chunk_id, data);
+            chunks.insert(chunk_id, Bytes::from(data));
 
             if chunks.is_complete() {
-                let msg = chunks.get_complete_message();
-                broadcast_proxy.broadcast_send(&msg).await.unwrap();
+                let body = chunks.get_complete_payload();
+                broadcast_proxy
+                    .broadcast_send(&Message {
+                        sender_id: header.sender_id,
+                        chunk_id: 0,
+                        num_chunks: 1,
+                        counter,
+                        collective: CollectiveType::Broadcast,
+                        data: body,
+                    })
+                    .await
+                    .unwrap();
             } else {
                 by_counter.insert(counter, chunks);
             }
@@ -543,29 +554,29 @@ impl RabbitMQReceiveProxy {
             let sender = sender.clone();
             let options = rabbitmq_options.clone();
             async move {
-                match delivery_result {
-                    Ok(Some(delivery)) => {
-                        let delivery_tag = delivery.delivery_tag;
-                        let (header, data) = get_message(delivery);
-                        //debug!("Received chunk: {:?}", header);
-                        let sender_id = header.sender_id;
-                        let collective = header.collective;
-                        let counter = header.counter;
-                        ms.insert(header, data);
-                        //debug!("Message inserted into store: {:?}", ms);
-                        if let Some(msg) = ms.get(&sender_id, &collective, &counter) {
-                            //debug!("Message is complete: {:?}", msg);
-                            sender.send(msg).unwrap();
-                        }
-                        if options.ack {
-                            c.basic_ack(delivery_tag, BasicAckOptions::default())
-                                .await
-                                .unwrap();
-                        }
-                    }
-                    Ok(None) => debug!("Consumer cancelled!"),
-                    Err(e) => error!("Error caught in consumer: {}", e),
-                }
+                // match delivery_result {
+                //     Ok(Some(delivery)) => {
+                //         let delivery_tag = delivery.delivery_tag;
+                //         let (header, data) = get_message(delivery);
+                //         //debug!("Received chunk: {:?}", header);
+                //         let sender_id = header.sender_id;
+                //         let collective = header.collective;
+                //         let counter = header.counter;
+                //         ms.insert(header, data);
+                //         //debug!("Message inserted into store: {:?}", ms);
+                //         if let Some(msg) = ms.get(&sender_id, &collective, &counter) {
+                //             //debug!("Message is complete: {:?}", msg);
+                //             sender.send(msg).unwrap();
+                //         }
+                //         if options.ack {
+                //             c.basic_ack(delivery_tag, BasicAckOptions::default())
+                //                 .await
+                //                 .unwrap();
+                //         }
+                //     }
+                //     Ok(None) => debug!("Consumer cancelled!"),
+                //     Err(e) => error!("Error caught in consumer: {}", e),
+                // }
             }
         });
 
