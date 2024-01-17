@@ -1,30 +1,24 @@
-use crate::{
-    chunk_store::{chunk_message, ChunkedMessageBody, VecChunkedMessageBody},
-    impl_chainable_setter,
-    message_store::MessageStoreChunked,
-    BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy, Result, SendProxy,
-    SendReceiveFactory, SendReceiveProxy,
-};
+use std::{collections::HashMap, sync::Arc};
+
 use async_trait::async_trait;
+
 use bytes::Bytes;
 use futures::StreamExt;
 use lapin::{
-    message::{Delivery, DeliveryResult},
+    message::Delivery,
     options::{
-        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, ConfirmSelectOptions,
-        ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
+        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions,
+        QueueBindOptions, QueueDeclareOptions,
     },
     types::{AMQPValue, FieldTable},
-    BasicProperties, Channel, Connection, ExchangeKind,
-};
-use log::{debug, error};
-use redis::FromRedisValue;
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{
-    mpsc::{self, UnboundedReceiver},
-    Mutex,
+    BasicProperties, Channel, Connection, Consumer, ExchangeKind,
 };
 use uuid::Uuid;
+
+use crate::{
+    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
+    Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+};
 
 #[derive(Clone, Debug)]
 pub struct RabbitMQOptions {
@@ -36,8 +30,6 @@ pub struct RabbitMQOptions {
     pub ack: bool,
     pub durable_exchanges: bool,
     pub durable_queues: bool,
-    pub publisher_confirms: bool,
-    pub max_chunk_size: usize,
 }
 
 impl RabbitMQOptions {
@@ -80,14 +72,6 @@ impl RabbitMQOptions {
         durable_queues, bool
     }
 
-    impl_chainable_setter! {
-        publisher_confirms, bool
-    }
-
-    impl_chainable_setter! {
-        max_chunk_size, usize
-    }
-
     pub fn build(&self) -> Self {
         self.clone()
     }
@@ -104,8 +88,6 @@ impl Default for RabbitMQOptions {
             ack: true,
             durable_exchanges: true,
             durable_queues: true,
-            publisher_confirms: true,
-            max_chunk_size: 1024 * 1024, // 1 MB
         }
     }
 }
@@ -122,11 +104,12 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
         HashMap<u32, Box<dyn SendReceiveProxy>>,
         Box<dyn BroadcastSendProxy>,
     )> {
-        let connection =
-            Connection::connect(&rabbitmq_options.rabbitmq_uri, Default::default()).await?;
+        let connection = Arc::new(
+            Connection::connect(&rabbitmq_options.rabbitmq_uri, Default::default()).await?,
+        );
         let rabbitmq_options = Arc::new(rabbitmq_options);
         init_rabbit(
-            connection,
+            connection.clone(),
             burst_options.clone(),
             rabbitmq_options.clone(),
             broadcast_proxy,
@@ -141,10 +124,10 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
         let mut hmap = HashMap::new();
 
         futures::future::try_join_all(current_group.iter().map(|worker_id| {
-            // let c = connection.clone();
+            let c = connection.clone();
             let r = rabbitmq_options.clone();
             let b = burst_options.clone();
-            async move { RabbitMQProxy::new(r, b, *worker_id).await }
+            async move { RabbitMQProxy::new(c.clone(), r.clone(), b.clone(), *worker_id).await }
         }))
         .await?
         .into_iter()
@@ -157,19 +140,21 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
 
         Ok((
             hmap,
-            Box::new(RabbitMQBroadcastSendProxy::new(rabbitmq_options, burst_options).await?)
-                as Box<dyn BroadcastSendProxy>,
+            Box::new(
+                RabbitMQBroadcastSendProxy::new(connection, rabbitmq_options, burst_options)
+                    .await?,
+            ) as Box<dyn BroadcastSendProxy>,
         ))
     }
 }
 
 async fn init_rabbit(
-    connection: Connection,
+    connection: Arc<Connection>,
     burst_options: Arc<BurstOptions>,
     rabbitmq_options: Arc<RabbitMQOptions>,
     broadcast_proxy: Box<dyn BroadcastSendProxy>,
 ) -> Result<()> {
-    let channel = create_rabbit_channel(&connection, &rabbitmq_options).await?;
+    let channel = connection.create_channel().await?;
 
     // Declare direct exchange
     let direct_exchange = get_direct_exchange_name(
@@ -280,13 +265,13 @@ async fn init_rabbit(
     channel.close(200, "Bye").await?;
 
     // spawn task to receive broadcast messages and send them to the broadcast proxy
-    let broadcast_channel = create_rabbit_channel(&connection, &rabbitmq_options).await?;
+    let broadcast_channel = connection.create_channel().await?;
     let broadcast_queue = get_broadcast_queue_name(
         &rabbitmq_options.broadcast_queue_prefix,
         &burst_options.burst_id,
         &burst_options.group_id,
     );
-    let mut broadcast_consumer = broadcast_channel
+    let broadcast_consumer = broadcast_channel
         .basic_consume(
             &broadcast_queue,
             &get_consumer_tag(),
@@ -299,53 +284,17 @@ async fn init_rabbit(
         .await?;
     let r = rabbitmq_options.clone();
     tokio::spawn(async move {
-        let mut chunk_store: HashMap<u32, HashMap<u32, VecChunkedMessageBody>> = HashMap::new();
+        let mut broadcast_consumer = broadcast_consumer;
         while let Some(delivery) = broadcast_consumer.next().await {
             let delivery = delivery.unwrap();
-
             if r.ack {
                 broadcast_channel
                     .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
                     .await
                     .unwrap();
             }
-
-            let (header, data) = get_message(delivery);
-
-            assert!(
-                header.collective == CollectiveType::Broadcast,
-                "Expected broadcast message"
-            );
-
-            let counter = header.counter;
-            let chunk_id = header.chunk_id;
-
-            // By sender_id and counter
-            let by_counter = chunk_store
-                .entry(header.sender_id)
-                .or_insert_with(|| HashMap::new());
-            let mut chunks = by_counter
-                .remove(&counter)
-                .unwrap_or_else(|| VecChunkedMessageBody::new(header.num_chunks));
-
-            chunks.insert(chunk_id, Bytes::from(data));
-
-            if chunks.is_complete() {
-                let body = chunks.get_complete_body();
-                broadcast_proxy
-                    .broadcast_send(&Message {
-                        sender_id: header.sender_id,
-                        chunk_id: 0,
-                        num_chunks: 1,
-                        counter,
-                        collective: CollectiveType::Broadcast,
-                        data: body,
-                    })
-                    .await
-                    .unwrap();
-            } else {
-                by_counter.insert(counter, chunks);
-            }
+            let msg = get_message(delivery);
+            broadcast_proxy.broadcast_send(&msg).await.unwrap();
         }
     });
 
@@ -365,7 +314,9 @@ pub struct RabbitMQSendProxy {
 }
 
 pub struct RabbitMQReceiveProxy {
-    receiver: Mutex<UnboundedReceiver<Message>>,
+    channel: Channel,
+    options: Arc<RabbitMQOptions>,
+    consumer: Consumer,
 }
 
 pub struct RabbitMQBroadcastSendProxy {
@@ -392,13 +343,11 @@ impl ReceiveProxy for RabbitMQProxy {
 
 impl RabbitMQProxy {
     pub async fn new(
+        connection: Arc<Connection>,
         rabbitmq_options: Arc<RabbitMQOptions>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
     ) -> Result<Self> {
-        let connection = Arc::new(
-            Connection::connect(&rabbitmq_options.rabbitmq_uri, Default::default()).await?,
-        );
         Ok(Self {
             worker_id,
             sender: Box::new(
@@ -446,7 +395,7 @@ impl RabbitMQSendProxy {
         rabbitmq_options: Arc<RabbitMQOptions>,
         burst_options: Arc<BurstOptions>,
     ) -> Result<Self> {
-        let channel = create_rabbit_channel(&connection, &rabbitmq_options).await?;
+        let channel = connection.create_channel().await?;
         Ok(Self {
             channel,
             rabbitmq_options,
@@ -458,23 +407,23 @@ impl RabbitMQSendProxy {
 #[async_trait]
 impl ReceiveProxy for RabbitMQReceiveProxy {
     async fn recv(&self) -> Result<Message> {
-        self.receiver
-            .lock()
-            .await
-            .recv()
-            .await
-            .ok_or("No more messages".into())
+        let delivery = self.consumer.clone().next().await.unwrap()?;
+        if self.options.ack {
+            self.channel
+                .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
+                .await?;
+        }
+        Ok(get_message(delivery))
     }
 }
 
 impl RabbitMQBroadcastSendProxy {
     pub async fn new(
+        connection: Arc<Connection>,
         rabbitmq_options: Arc<RabbitMQOptions>,
         burst_options: Arc<BurstOptions>,
     ) -> Result<Self> {
-        let connection =
-            Connection::connect(&rabbitmq_options.rabbitmq_uri, Default::default()).await?;
-        let channel = create_rabbit_channel(&connection, &rabbitmq_options).await?;
+        let channel = connection.create_channel().await?;
         Ok(Self {
             channel,
             rabbitmq_options,
@@ -517,7 +466,7 @@ impl RabbitMQReceiveProxy {
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
     ) -> Result<Self> {
-        let channel = create_rabbit_channel(&connection, &rabbitmq_options).await?;
+        let channel = connection.create_channel().await?;
         let consumer = channel
             .basic_consume(
                 &get_queue_name(
@@ -533,55 +482,10 @@ impl RabbitMQReceiveProxy {
                 FieldTable::default(),
             )
             .await?;
-
-        let message_store = Arc::new(MessageStoreChunked::new(
-            (0..burst_options.burst_size).into_iter(),
-            &[
-                CollectiveType::Direct,
-                CollectiveType::Gather,
-                CollectiveType::Scatter,
-                CollectiveType::AllToAll,
-            ],
-        ));
-
-        let (sender, receiver) = mpsc::unbounded_channel();
-
-        let ms = message_store.clone();
-
-        consumer.set_delegate(move |delivery_result: DeliveryResult| {
-            let c = channel.clone();
-            let ms = ms.clone();
-            let sender = sender.clone();
-            let options = rabbitmq_options.clone();
-            async move {
-                // match delivery_result {
-                //     Ok(Some(delivery)) => {
-                //         let delivery_tag = delivery.delivery_tag;
-                //         let (header, data) = get_message(delivery);
-                //         //debug!("Received chunk: {:?}", header);
-                //         let sender_id = header.sender_id;
-                //         let collective = header.collective;
-                //         let counter = header.counter;
-                //         ms.insert(header, data);
-                //         //debug!("Message inserted into store: {:?}", ms);
-                //         if let Some(msg) = ms.get(&sender_id, &collective, &counter) {
-                //             //debug!("Message is complete: {:?}", msg);
-                //             sender.send(msg).unwrap();
-                //         }
-                //         if options.ack {
-                //             c.basic_ack(delivery_tag, BasicAckOptions::default())
-                //                 .await
-                //                 .unwrap();
-                //         }
-                //     }
-                //     Ok(None) => debug!("Consumer cancelled!"),
-                //     Err(e) => error!("Error caught in consumer: {}", e),
-                // }
-            }
-        });
-
         Ok(Self {
-            receiver: Mutex::new(receiver),
+            channel,
+            options: rabbitmq_options,
+            consumer,
         })
     }
 }
@@ -605,7 +509,6 @@ async fn send_direct(
             &burst_options.burst_id,
             dest,
         ),
-        rabbitmq_options,
     )
     .await
 }
@@ -626,7 +529,6 @@ async fn send_broadcast(
             dest,
         ),
         "",
-        rabbitmq_options,
     )
     .await
 }
@@ -636,54 +538,28 @@ async fn send_rabbit(
     msg: &Message,
     exchange: &str,
     routing_key: &str,
-    options: &RabbitMQOptions,
 ) -> Result<()> {
-    futures::future::try_join_all(chunk_message(msg, options.max_chunk_size).into_iter().map(
-        |msg| async move {
-            let mut fields = FieldTable::default();
-            fields.insert("sender_id".into(), AMQPValue::LongUInt(msg.sender_id));
-            fields.insert("chunk_id".into(), AMQPValue::LongUInt(msg.chunk_id));
-            fields.insert("num_chunks".into(), AMQPValue::LongUInt(msg.num_chunks));
-            fields.insert("counter".into(), AMQPValue::LongUInt(msg.counter));
-            fields.insert(
-                "collective".into(),
-                AMQPValue::LongUInt(msg.collective as u32),
-            );
+    let mut fields = FieldTable::default();
+    fields.insert("sender_id".into(), AMQPValue::LongUInt(msg.sender_id));
+    fields.insert("chunk_id".into(), AMQPValue::LongUInt(msg.chunk_id));
+    fields.insert("num_chunks".into(), AMQPValue::LongUInt(msg.num_chunks));
+    fields.insert("counter".into(), AMQPValue::LongUInt(msg.counter));
 
-            channel
-                .basic_publish(
-                    exchange,
-                    routing_key,
-                    BasicPublishOptions::default(),
-                    &msg.data,
-                    BasicProperties::default().with_headers(fields),
-                )
-                .await?;
-            Ok::<_, lapin::Error>(())
-        },
-    ))
-    .await?;
+    fields.insert(
+        "collective".into(),
+        AMQPValue::LongUInt(msg.collective as u32),
+    );
 
-    if options.publisher_confirms {
-        let r = channel.wait_for_confirms().await?;
-        if !r.is_empty() {
-            return Err("Not all messages were confirmed".into());
-        }
-    }
+    channel
+        .basic_publish(
+            exchange,
+            routing_key,
+            BasicPublishOptions::default(),
+            &msg.data,
+            BasicProperties::default().with_headers(fields),
+        )
+        .await?;
     Ok(())
-}
-
-async fn create_rabbit_channel(
-    connection: &Connection,
-    options: &RabbitMQOptions,
-) -> Result<Channel> {
-    let channel = connection.create_channel().await?;
-    if options.publisher_confirms {
-        channel
-            .confirm_select(ConfirmSelectOptions::default())
-            .await?;
-    }
-    Ok(channel)
 }
 
 fn get_direct_exchange_name(prefix: &str, burst_id: &str) -> String {
@@ -706,28 +582,65 @@ fn get_consumer_tag() -> String {
     format!("consumer_{}", Uuid::new_v4())
 }
 
-fn get_message(delivery: Delivery) -> (Message, Vec<u8>) {
-    let data = delivery.data;
-    let map = delivery.properties.headers().as_ref().unwrap().inner();
-    let sender_id = map.get("sender_id").unwrap().as_long_uint().unwrap();
-    let chunk_id = map.get("chunk_id").unwrap().as_long_uint().unwrap();
-    let num_chunks = map.get("num_chunks").unwrap().as_long_uint().unwrap();
-    let counter = map.get("counter").unwrap().as_long_uint().unwrap();
-    let collective = map
+fn get_message(delivery: Delivery) -> Message {
+    let data = Bytes::from(delivery.data);
+    let sender_id = delivery
+        .properties
+        .headers()
+        .as_ref()
+        .unwrap()
+        .inner()
+        .get("sender_id")
+        .unwrap()
+        .as_long_uint()
+        .unwrap();
+    let chunk_id = delivery
+        .properties
+        .headers()
+        .as_ref()
+        .unwrap()
+        .inner()
+        .get("chunk_id")
+        .unwrap()
+        .as_long_uint()
+        .unwrap();
+    let num_chunks = delivery
+        .properties
+        .headers()
+        .as_ref()
+        .unwrap()
+        .inner()
+        .get("num_chunks")
+        .unwrap()
+        .as_long_uint()
+        .unwrap();
+    let counter = delivery
+        .properties
+        .headers()
+        .as_ref()
+        .unwrap()
+        .inner()
+        .get("counter")
+        .unwrap()
+        .as_long_uint()
+        .unwrap();
+    let collective = delivery
+        .properties
+        .headers()
+        .as_ref()
+        .unwrap()
+        .inner()
         .get("collective")
         .unwrap()
         .as_long_uint()
         .unwrap()
         .into();
-    (
-        Message {
-            sender_id,
-            chunk_id,
-            num_chunks,
-            counter,
-            collective,
-            data: Bytes::new(),
-        },
+    Message {
+        sender_id,
+        chunk_id,
+        num_chunks,
+        counter,
+        collective,
         data,
-    )
+    }
 }
