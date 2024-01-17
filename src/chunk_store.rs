@@ -99,9 +99,15 @@ impl ChunkStore for VecChunkStore {
 ///
 /// A vector of chunked messages.
 pub fn chunk_message(msg: &Message, max_chunk_size: usize) -> Vec<Message> {
-    let chunked_data = chunk_data(msg.data.clone(), max_chunk_size);
-    let num_chunks = chunked_data.len();
-    chunked_data
+    let mut chunks = Vec::new();
+    let mut body = msg.data.clone();
+    while !body.is_empty() {
+        let chunk = body.split_to(std::cmp::min(body.len(), max_chunk_size));
+        chunks.push(chunk);
+    }
+
+    let num_chunks = chunks.len();
+    chunks
         .into_iter()
         .enumerate()
         .map(|(i, data)| Message {
@@ -113,23 +119,4 @@ pub fn chunk_message(msg: &Message, max_chunk_size: usize) -> Vec<Message> {
             data,
         })
         .collect()
-}
-
-/// Splits the data into multiple smaller chunks based on the maximum chunk size.
-///
-/// # Arguments
-///
-/// * `data` - The original data.
-/// * `max_chunk_size` - The maximum size of each chunk.
-///
-/// # Returns
-///
-/// A vector of chunked data.
-pub fn chunk_data(mut data: Bytes, max_chunk_size: usize) -> Vec<Bytes> {
-    let mut chunks = Vec::new();
-    while !data.is_empty() {
-        let chunk = data.split_to(std::cmp::min(data.len(), max_chunk_size));
-        chunks.push(chunk);
-    }
-    chunks
 }
