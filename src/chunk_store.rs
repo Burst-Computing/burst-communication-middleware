@@ -1,11 +1,11 @@
 use crate::Message;
 use bytes::{Bytes, BytesMut};
 
-/// Trait representing a chunk store.
+/// Trait representing a chunked message body.
 ///
-/// This trait is used to define the behavior of a chunk store, which is responsible for storing
-/// and retrieving chunks of a [`Message`].
-pub trait ChunkStore {
+/// This trait is used to define the behavior of a chunked message body, which is responsible for storing
+/// and retrieving chunks of a [`Message`] body.
+pub trait ChunkedMessageBody {
     /// Inserts a chunk into the `ChunkStore` at the specified chunk ID.
     ///
     /// # Arguments
@@ -30,32 +30,31 @@ pub trait ChunkStore {
     /// # Panics
     ///
     /// Panics if the message is not complete.
-    fn get_complete_payload(self) -> Bytes;
+    fn get_complete_body(self) -> Bytes;
 }
 
-/// A [`ChunkStore`] implementation that stores the chunks in a [`Vec`].
+/// A [`ChunkedMessageBody`] implementation that stores the chunks in a [`Vec`].
 #[derive(Debug)]
-pub struct VecChunkStore {
+pub struct VecChunkedMessageBody {
     array: Vec<Bytes>,
     num_chunks: u32,
     num_chunks_received: u32,
     is_complete: bool,
 }
 
-impl VecChunkStore {
-    /// Creates a new [`ChunkStore`] instance.
+impl VecChunkedMessageBody {
+    /// Creates a new [`ChunkedMessageBody`] instance.
     ///
     /// # Arguments
     ///
     /// * `num_chunks` - The total number of chunks in the message.
-    /// * `msg_header` - The header of the message.
     ///
     /// # Returns
     ///
-    /// A new `ChunkStore` instance.
+    /// A new [`ChunkedMessageBody`] instance.
     pub fn new(num_chunks: u32) -> Self {
         Self {
-            array: vec![Vec::new().into(); num_chunks as usize],
+            array: Vec::with_capacity(num_chunks as usize),
             num_chunks,
             num_chunks_received: 0,
             is_complete: false,
@@ -63,7 +62,7 @@ impl VecChunkStore {
     }
 }
 
-impl ChunkStore for VecChunkStore {
+impl ChunkedMessageBody for VecChunkedMessageBody {
     fn insert(&mut self, chunk_id: u32, chunk: Bytes) {
         self.array[chunk_id as usize] = chunk;
         self.num_chunks_received += 1;
@@ -78,7 +77,7 @@ impl ChunkStore for VecChunkStore {
         self.is_complete
     }
 
-    fn get_complete_payload(self) -> Bytes {
+    fn get_complete_body(self) -> Bytes {
         assert!(self.is_complete(), "Message is not complete");
         let mut data = BytesMut::with_capacity(self.array.iter().map(|x| x.len()).sum());
         for chunk in self.array {

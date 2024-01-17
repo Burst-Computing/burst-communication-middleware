@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
 use crate::{
-    chunk_store::{ChunkStore, VecChunkStore},
+    chunk_store::{ChunkedMessageBody, VecChunkedMessageBody},
     types::{CollectiveType, Message},
 };
 use std::{
@@ -205,7 +205,7 @@ impl MessageStore for MessageStoreHashMap {
 
 /// A [`MessageStore`] implementation that uses a [`HashMap`] and [`ChunkStore`]s to store messages.
 pub struct MessageStoreChunked {
-    messages: HashMap<u32, HashMap<CollectiveType, Mutex<HashMap<u32, VecChunkStore>>>>,
+    messages: HashMap<u32, HashMap<CollectiveType, Mutex<HashMap<u32, VecChunkedMessageBody>>>>,
 }
 
 impl MessageStoreChunked {
@@ -266,7 +266,7 @@ impl MessageStoreChunked {
             chunk_store.insert(chunk_id, msg.data);
         } else {
             let counter = msg.counter;
-            let mut chunk_store = VecChunkStore::new(msg.num_chunks);
+            let mut chunk_store = VecChunkedMessageBody::new(msg.num_chunks);
             chunk_store.insert(chunk_id, msg.data);
             by_counter_write.insert(counter, chunk_store);
         }
@@ -308,7 +308,7 @@ impl MessageStoreChunked {
 
         if is_complete {
             let chunk_store = by_counter_write.remove(counter).unwrap();
-            let body = chunk_store.get_complete_payload();
+            let body = chunk_store.get_complete_body();
             return Some(Message {
                 sender_id: *sender_id,
                 chunk_id: 0,
@@ -348,7 +348,7 @@ impl MessageStoreChunked {
         match complete_counter {
             Some(counter) => {
                 let chunk_store = by_counter.remove(&counter).unwrap();
-                let body = chunk_store.get_complete_payload();
+                let body = chunk_store.get_complete_body();
                 return Some(Message {
                     sender_id: *sender_id,
                     chunk_id: 0,

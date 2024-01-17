@@ -1,5 +1,5 @@
 use crate::{
-    chunk_store::{chunk_message, ChunkStore, VecChunkStore},
+    chunk_store::{chunk_message, ChunkedMessageBody, VecChunkedMessageBody},
     impl_chainable_setter,
     message_store::MessageStoreChunked,
     BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy, Result, SendProxy,
@@ -299,7 +299,7 @@ async fn init_rabbit(
         .await?;
     let r = rabbitmq_options.clone();
     tokio::spawn(async move {
-        let mut chunk_store: HashMap<u32, HashMap<u32, VecChunkStore>> = HashMap::new();
+        let mut chunk_store: HashMap<u32, HashMap<u32, VecChunkedMessageBody>> = HashMap::new();
         while let Some(delivery) = broadcast_consumer.next().await {
             let delivery = delivery.unwrap();
 
@@ -326,12 +326,12 @@ async fn init_rabbit(
                 .or_insert_with(|| HashMap::new());
             let mut chunks = by_counter
                 .remove(&counter)
-                .unwrap_or_else(|| VecChunkStore::new(header.num_chunks));
+                .unwrap_or_else(|| VecChunkedMessageBody::new(header.num_chunks));
 
             chunks.insert(chunk_id, Bytes::from(data));
 
             if chunks.is_complete() {
-                let body = chunks.get_complete_payload();
+                let body = chunks.get_complete_body();
                 broadcast_proxy
                     .broadcast_send(&Message {
                         sender_id: header.sender_id,
