@@ -248,17 +248,30 @@ impl BurstMiddleware {
                 data,
             };
 
-            match tokio::join!(
-                self.local_broadcast.broadcast_send(&msg),
-                self.remote_broadcast_send.broadcast_send(&msg)
-            ) {
-                (Ok(()), Ok(())) => {}
-                (Err(e), _) | (_, Err(e)) => return Err(e),
+            let local_fut = self.local_broadcast.broadcast_send(&msg);
+
+            if self.enable_message_chunking {
+                // do remote send with chunking if enabled
+                let chunked_messages = chunk_message(&msg, self.message_chunk_size);
+                log::debug!("Chunked message in {} parts", chunked_messages.len());
+
+                futures::future::try_join_all(
+                    chunked_messages
+                        .iter()
+                        .map(|msg| self.remote_broadcast_send.broadcast_send(msg)),
+                )
+                .await?;
+            } else {
+                // do remote send in one chunk
+                self.remote_broadcast_send.broadcast_send(&msg).await?;
             }
+
+            local_fut.await?;
         } else {
             // If there is a message in the buffer, return it
             if let Some(msg) =
-                self.get_message_collective(ROOT_ID, &CollectiveType::Broadcast, counter)
+                self.message_store
+                    .get(&ROOT_ID, &CollectiveType::Broadcast, &counter)
             {
                 // Increment broadcast counter
                 self.increment_counter(&CollectiveType::Broadcast);
@@ -436,6 +449,7 @@ impl BurstMiddleware {
             if self.enable_message_chunking {
                 // do remote send with chunking if enabled
                 let chunked_messages = chunk_message(&msg, self.message_chunk_size);
+                log::debug!("Chunked message in {} parts", chunked_messages.len());
 
                 futures::future::try_join_all(
                     chunked_messages
@@ -494,6 +508,14 @@ impl BurstMiddleware {
             // receive blocking
             let recv_msg = self.receive(from).await?;
             log::debug!("worker {} received message {:?}", self.worker_id, recv_msg);
+
+            if recv_msg.num_chunks == 1
+                && recv_msg.counter == counter
+                && recv_msg.collective == *collective
+            {
+                return Ok(recv_msg);
+            }
+
             self.message_store.insert(recv_msg);
 
             if let Some(msg) = self.message_store.get(&from, collective, &counter) {
@@ -511,9 +533,14 @@ impl BurstMiddleware {
             // receive blocking
             let msg = self.receive(from).await?;
             log::debug!("worker {} received message {:?}", self.worker_id, msg);
-            self.message_store.insert(msg);
 
+            if msg.num_chunks == 1 && msg.collective == *collective {
+                return Ok(msg);
+            }
+
+            self.message_store.insert(msg);
             if let Some(msg) = self.message_store.get_any(&from, collective) {
+                log::debug!("got complete message {:?}", msg);
                 return Ok(msg);
             };
             // if msg.collective == *collective {
@@ -528,11 +555,28 @@ impl BurstMiddleware {
         loop {
             // receive blocking
             let msg = self.receive_broadcast().await?;
-            if msg.counter == counter && msg.collective == CollectiveType::Broadcast {
+            log::debug!("worker {} received message {:?}", self.worker_id, msg);
+
+            if msg.num_chunks == 1 && msg.counter == counter {
                 return Ok(msg);
-            } else {
-                self.message_store.insert(msg);
             }
+
+            let sender_id = msg.sender_id;
+            self.message_store.insert(msg);
+            if let Some(msg) =
+                self.message_store
+                    .get(&sender_id, &CollectiveType::Broadcast, &counter)
+            {
+                log::debug!("Got complete message {:?}", msg);
+                return Ok(msg);
+            };
+
+            // let msg = self.receive_broadcast().await?;
+            // if msg.counter == counter && msg.collective == CollectiveType::Broadcast {
+            // return Ok(msg);
+            // } else {
+            // self.message_store.insert(msg);
+            // }
         }
     }
 

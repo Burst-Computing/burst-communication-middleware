@@ -53,8 +53,10 @@ impl VecChunkedMessageBody {
     ///
     /// A new [`ChunkedMessageBody`] instance.
     pub fn new(num_chunks: u32) -> Self {
+        let mut array = Vec::with_capacity(num_chunks as usize);
+        array.resize(num_chunks as usize, Bytes::new());
         Self {
-            array: Vec::with_capacity(num_chunks as usize),
+            array,
             num_chunks,
             num_chunks_received: 0,
             is_complete: false,
