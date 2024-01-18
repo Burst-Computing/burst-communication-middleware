@@ -58,7 +58,7 @@ async fn main() {
         //     .endpoint(None)
         //     .enable_broadcast(true)
         //     .build();
-        // let redislist_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
+        // let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
 
         let proxies =
             match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
@@ -104,29 +104,20 @@ async fn group(proxies: HashMap<u32, BurstMiddleware>) -> Vec<std::thread::JoinH
 }
 
 pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std::error::Error>> {
-    let res: Message;
-    if burst_middleware.info().worker_id == 0 {
-        let msg = "hello world";
-        let data = Bytes::from(msg);
-        log::info!(
-            "worker {} (root)  => sending broadcast data: {:?}",
-            burst_middleware.info().worker_id,
-            data
-        );
-        res = burst_middleware.broadcast(Some(data)).await.unwrap();
-    } else {
-        log::info!(
-            "worker {} (group {}) => waiting for broadcast",
-            burst_middleware.info().worker_id,
-            burst_middleware.info().group_id
-        );
-        res = burst_middleware.broadcast(None).await.unwrap();
-        log::info!(
-            "worker {} (group {}) => received broadcast data: {:?}",
-            burst_middleware.info().worker_id,
-            burst_middleware.info().group_id,
-            res
-        );
+    let msg = format!("hello from worker {}", burst_middleware.info().worker_id);
+    let data = Bytes::from(msg);
+
+    match burst_middleware.gather(data).await.unwrap() {
+        Some(msgs) => {
+            for msg in msgs {
+                info!(
+                    "worker {} received message: {:?}",
+                    burst_middleware.info().worker_id,
+                    msg
+                );
+            }
+        }
+        None => {}
     }
     Ok(())
 }

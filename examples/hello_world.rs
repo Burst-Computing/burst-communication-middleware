@@ -19,7 +19,14 @@ async fn main() {
 
     let mut proxies =
         match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
-            BurstOptions::new("hello_world".to_string(), 2, group_ranges, 0.to_string()),
+            BurstOptions::new(
+                "hello_world".to_string(),
+                2,
+                group_ranges,
+                0.to_string(),
+                true,
+                4 * 1024 * 1024,
+            ),
             TokioChannelOptions::new()
                 .broadcast_channel_size(256)
                 .build(),

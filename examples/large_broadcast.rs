@@ -4,6 +4,7 @@ use burst_communication_middleware::{
 };
 use bytes::Bytes;
 use log::{error, info};
+use redis::FromRedisValue;
 use std::{
     collections::{HashMap, HashSet},
     env, thread,
@@ -11,6 +12,7 @@ use std::{
 
 const BURST_SIZE: u32 = 64;
 const GROUPS: u32 = 4;
+const PAYLOAD_SIZE: u32 = 256 * 1024 * 1024; // 256 MB
 
 #[tokio::main]
 async fn main() {
@@ -46,10 +48,10 @@ async fn main() {
             .broadcast_channel_size(256)
             .build();
 
-        let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-            .durable_queues(true)
-            .ack(true)
-            .build();
+        // let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+        //     .durable_queues(true)
+        //     .ack(true)
+        //     .build();
         // let s3_options = S3Options::new(env::var("S3_BUCKET").unwrap())
         //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
         //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
@@ -58,10 +60,10 @@ async fn main() {
         //     .endpoint(None)
         //     .enable_broadcast(true)
         //     .build();
-        // let redislist_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
+        let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
 
         let proxies =
-            match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
+            match BurstMiddleware::create_proxies::<TokioChannelImpl, RedisListImpl, _, _>(
                 burst_options,
                 channel_options,
                 backend_options,
@@ -106,12 +108,11 @@ async fn group(proxies: HashMap<u32, BurstMiddleware>) -> Vec<std::thread::JoinH
 pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std::error::Error>> {
     let res: Message;
     if burst_middleware.info().worker_id == 0 {
-        let msg = "hello world";
-        let data = Bytes::from(msg);
+        let data = Bytes::from(vec![0; PAYLOAD_SIZE as usize]);
         log::info!(
-            "worker {} (root)  => sending broadcast data: {:?}",
+            "worker {} (root)  => sending broadcast message with size {}",
             burst_middleware.info().worker_id,
-            data
+            data.len()
         );
         res = burst_middleware.broadcast(Some(data)).await.unwrap();
     } else {
@@ -121,12 +122,13 @@ pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std
             burst_middleware.info().group_id
         );
         res = burst_middleware.broadcast(None).await.unwrap();
-        log::info!(
-            "worker {} (group {}) => received broadcast data: {:?}",
-            burst_middleware.info().worker_id,
-            burst_middleware.info().group_id,
-            res
-        );
     }
+
+    log::info!(
+        "worker {} (group {}) => received broadcast message {:?}",
+        burst_middleware.info().worker_id,
+        burst_middleware.info().group_id,
+        res
+    );
     Ok(())
 }

@@ -9,6 +9,8 @@ use std::{
     env, thread, vec,
 };
 
+const PAYLOAD_SIZE: u32 = 256 * 1024 * 1024; // 256 MB
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -121,26 +123,16 @@ async fn main() {
 }
 
 pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std::error::Error>> {
-    info!("hi im worker with id={}", burst_middleware.info().worker_id);
     if burst_middleware.info().worker_id == 0 {
-        info!(
-            "worker {} sending message",
-            burst_middleware.info().worker_id
-        );
-        let message = "hello world".to_string();
-        let payload = Bytes::from(message);
-        burst_middleware.send(1, payload).await.unwrap();
+        let body = vec![0; PAYLOAD_SIZE as usize];
+        let payload = Bytes::from(body);
 
         info!(
-            "worker {} waiting for response...",
-            burst_middleware.info().worker_id
-        );
-        let response = burst_middleware.recv(1).await.unwrap();
-        info!(
-            "worker {} received message: {:?}",
+            "worker {} sending message with size {}",
             burst_middleware.info().worker_id,
-            response
+            payload.len()
         );
+        burst_middleware.send(1, payload).await.unwrap();
     } else {
         info!(
             "worker {} waiting for message...",
@@ -148,18 +140,11 @@ pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std
         );
         let message = burst_middleware.recv(0).await.unwrap();
         info!(
-            "worker {} received message: {:?}",
+            "worker {} received message {:?} with size {}",
             burst_middleware.info().worker_id,
-            message
+            message,
+            message.data.len()
         );
-        let response = "bye!".to_string();
-        let payload = Bytes::from(response);
-        info!(
-            "worker {} sending response",
-            burst_middleware.info().worker_id
-        );
-        burst_middleware.send(0, payload).await.unwrap();
-        info!("worker {} done!", burst_middleware.info().worker_id);
     }
     Ok(())
 }
