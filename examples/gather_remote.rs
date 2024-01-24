@@ -9,8 +9,8 @@ use std::{
     env, thread,
 };
 
-const BURST_SIZE: u32 = 64;
-const GROUPS: u32 = 4;
+const BURST_SIZE: u32 = 24;
+const GROUPS: u32 = 2;
 
 #[tokio::main]
 async fn main() {
@@ -46,10 +46,10 @@ async fn main() {
             .broadcast_channel_size(256)
             .build();
 
-        let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-            .durable_queues(true)
-            .ack(true)
-            .build();
+        // let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+        //     .durable_queues(true)
+        //     .ack(true)
+        //     .build();
         // let s3_options = S3Options::new(env::var("S3_BUCKET").unwrap())
         //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
         //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
@@ -58,10 +58,10 @@ async fn main() {
         //     .endpoint(None)
         //     .enable_broadcast(true)
         //     .build();
-        // let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
+        let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
 
         let proxies =
-            match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
+            match BurstMiddleware::create_proxies::<TokioChannelImpl, RedisListImpl, _, _>(
                 burst_options,
                 channel_options,
                 backend_options,
