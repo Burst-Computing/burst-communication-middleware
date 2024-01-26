@@ -76,15 +76,13 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
             .get(&burst_options.group_id)
             .unwrap()
             .len();
-        let pool = Arc::new(
-            Config::from_url(redis_options.redis_uri.clone())
-                .builder()
-                .unwrap()
-                .max_size(group_size as usize)
-                // .runtime(Runtime::Tokio1)
-                .build()
-                .unwrap(),
-        );
+        let pool = Config::from_url(redis_options.redis_uri.clone())
+            .builder()
+            .unwrap()
+            .max_size(group_size as usize)
+            // .runtime(Runtime::Tokio1)
+            .build()
+            .unwrap();
         // let pool = conf.create_pool(Some(Runtime::Tokio1)).unwrap();
 
         // spawn task to receive broadcast messages and send them to the broadcast proxy
@@ -160,13 +158,13 @@ pub struct RedisListProxy {
 }
 
 pub struct RedisListSendProxy {
-    redis_pool: Arc<Pool>,
+    redis_pool: Pool,
     redis_options: Arc<RedisListOptions>,
     burst_options: Arc<BurstOptions>,
 }
 
 pub struct RedisListReceiveProxy {
-    redis_pool: Arc<Pool>,
+    redis_pool: Pool,
     redis_options: Arc<RedisListOptions>,
     burst_options: Arc<BurstOptions>,
     worker_id: u32,
@@ -196,7 +194,7 @@ impl ReceiveProxy for RedisListProxy {
 
 impl RedisListProxy {
     pub async fn new(
-        redis_pool: Arc<Pool>,
+        redis_pool: Pool,
         redis_options: Arc<RedisListOptions>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
@@ -220,7 +218,7 @@ impl RedisListProxy {
 
 impl RedisListSendProxy {
     pub fn new(
-        redis_pool: Arc<Pool>,
+        redis_pool: Pool,
         redis_options: Arc<RedisListOptions>,
         burst_options: Arc<BurstOptions>,
     ) -> Self {
@@ -242,7 +240,7 @@ impl SendProxy for RedisListSendProxy {
 
 impl RedisListReceiveProxy {
     pub fn new(
-        redis_pool: Arc<Pool>,
+        redis_pool: Pool,
         redis_options: Arc<RedisListOptions>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
