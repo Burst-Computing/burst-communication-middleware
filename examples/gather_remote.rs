@@ -1,6 +1,7 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, Message, RabbitMQMImpl, RabbitMQOptions, RedisListImpl,
-    RedisListOptions, RedisStreamOptions, S3Impl, S3Options, TokioChannelImpl, TokioChannelOptions,
+    BurstMiddleware, BurstOptions, Message, MiddlewareActorHandle, RabbitMQMImpl, RabbitMQOptions,
+    RedisListImpl, RedisListOptions, RedisStreamOptions, S3Impl, S3Options, TokioChannelImpl,
+    TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -9,12 +10,16 @@ use std::{
     env, thread,
 };
 
-const BURST_SIZE: u32 = 64;
-const GROUPS: u32 = 4;
+const BURST_SIZE: u32 = 512;
+const GROUPS: u32 = 16;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     env_logger::init();
+
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
     if BURST_SIZE % GROUPS != 0 {
         panic!("BURST_SIZE must be divisible by GROPUS");
@@ -46,10 +51,10 @@ async fn main() {
             .broadcast_channel_size(256)
             .build();
 
-        let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-            .durable_queues(true)
-            .ack(true)
-            .build();
+        // let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+        //     .durable_queues(true)
+        //     .ack(true)
+        //     .build();
         // let s3_options = S3Options::new(env::var("S3_BUCKET").unwrap())
         //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
         //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
@@ -58,24 +63,25 @@ async fn main() {
         //     .endpoint(None)
         //     .enable_broadcast(true)
         //     .build();
-        // let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
+        let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
 
-        let proxies =
-            match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
-                burst_options,
-                channel_options,
-                backend_options,
-            )
-            .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("{:?}", e);
-                    panic!();
-                }
-            };
+        let fut = tokio_runtime.spawn(BurstMiddleware::create_proxies::<
+            TokioChannelImpl,
+            RedisListImpl,
+            _,
+            _,
+        >(burst_options, channel_options, backend_options));
+        let proxies = tokio_runtime.block_on(fut).unwrap().unwrap();
 
-        let group_threads = group(proxies).await;
+        let actors = proxies
+            .into_iter()
+            .map(|(worker_id, middleware)| {
+                let actor = MiddlewareActorHandle::new(middleware, &tokio_runtime);
+                (worker_id, actor)
+            })
+            .collect::<HashMap<u32, MiddlewareActorHandle>>();
+
+        let group_threads = group(actors);
         threads.extend(group_threads);
     }
 
@@ -84,18 +90,13 @@ async fn main() {
     }
 }
 
-async fn group(proxies: HashMap<u32, BurstMiddleware>) -> Vec<std::thread::JoinHandle<()>> {
+fn group(proxies: HashMap<u32, MiddlewareActorHandle>) -> Vec<std::thread::JoinHandle<()>> {
     let mut threads = Vec::with_capacity(proxies.len());
     for (worker_id, proxy) in proxies {
         let thread = thread::spawn(move || {
             info!("thread start: id={}", worker_id);
-            let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let result = tokio_runtime.block_on(async { worker(proxy).await.unwrap() });
+            worker(proxy);
             info!("thread end: id={}", worker_id);
-            result
         });
         threads.push(thread);
     }
@@ -103,21 +104,19 @@ async fn group(proxies: HashMap<u32, BurstMiddleware>) -> Vec<std::thread::JoinH
     return threads;
 }
 
-pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std::error::Error>> {
-    let msg = format!("hello from worker {}", burst_middleware.info().worker_id);
+fn worker(burst_middleware: MiddlewareActorHandle) {
+    let msg = format!("hello from worker {}", burst_middleware.info.worker_id);
     let data = Bytes::from(msg);
 
-    match burst_middleware.gather(data).await.unwrap() {
+    match burst_middleware.gather(data).unwrap() {
         Some(msgs) => {
             for msg in msgs {
                 info!(
                     "worker {} received message: {:?}",
-                    burst_middleware.info().worker_id,
-                    msg
+                    burst_middleware.info.worker_id, msg
                 );
             }
         }
         None => {}
     }
-    Ok(())
 }
