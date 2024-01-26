@@ -2,10 +2,12 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 
+use deadpool_redis::{Config, Pool, Runtime};
 use redis::{
     aio::{ConnectionLike, MultiplexedConnection},
     AsyncCommands, Client,
 };
+// use redis::Client;
 
 use crate::{
     impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
@@ -68,6 +70,23 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
     )> {
         let redis_options = Arc::new(redis_options);
 
+        // create redis pool with deadpool
+        let group_size = burst_options
+            .group_ranges
+            .get(&burst_options.group_id)
+            .unwrap()
+            .len();
+        let pool = Arc::new(
+            Config::from_url(redis_options.redis_uri.clone())
+                .builder()
+                .unwrap()
+                .max_size(group_size as usize)
+                // .runtime(Runtime::Tokio1)
+                .build()
+                .unwrap(),
+        );
+        // let pool = conf.create_pool(Some(Runtime::Tokio1)).unwrap();
+
         // spawn task to receive broadcast messages and send them to the broadcast proxy
         let broascast_client = Client::open(redis_options.redis_uri.clone())?;
         let mut broadcast_connection = broascast_client.get_async_connection().await?;
@@ -82,7 +101,7 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
                 // wait for the next message containing the broadcast key
                 // log::debug!("waiting for broadcast message");
                 let (_, bcast_key): (String, String) = broadcast_connection
-                    .blpop(&broadcast_list, 0)
+                    .blpop(&broadcast_list, 0.0)
                     .await
                     .unwrap();
                 // log::debug!("received broadcast message with key {:?}", bcast_key);
@@ -109,10 +128,10 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
         let mut hmap = HashMap::new();
 
         futures::future::try_join_all(current_group.iter().map(|worker_id| {
-            let c = Client::open(redis_options.redis_uri.clone()).unwrap();
+            let p = pool.clone();
             let r = redis_options.clone();
             let b = burst_options.clone();
-            async move { RedisListProxy::new(c, r.clone(), b.clone(), *worker_id).await }
+            async move { RedisListProxy::new(p, r, b, *worker_id).await }
         }))
         .await?
         .into_iter()
@@ -141,13 +160,13 @@ pub struct RedisListProxy {
 }
 
 pub struct RedisListSendProxy {
-    connection: MultiplexedConnection,
+    redis_pool: Arc<Pool>,
     redis_options: Arc<RedisListOptions>,
     burst_options: Arc<BurstOptions>,
 }
 
 pub struct RedisListReceiveProxy {
-    connection: MultiplexedConnection,
+    redis_pool: Arc<Pool>,
     redis_options: Arc<RedisListOptions>,
     burst_options: Arc<BurstOptions>,
     worker_id: u32,
@@ -177,7 +196,7 @@ impl ReceiveProxy for RedisListProxy {
 
 impl RedisListProxy {
     pub async fn new(
-        client: Client,
+        redis_pool: Arc<Pool>,
         redis_options: Arc<RedisListOptions>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
@@ -185,12 +204,12 @@ impl RedisListProxy {
         Ok(Self {
             worker_id,
             sender: Box::new(RedisListSendProxy::new(
-                client.get_multiplexed_async_connection().await?,
+                redis_pool.clone(),
                 redis_options.clone(),
                 burst_options.clone(),
             )),
             receiver: Box::new(RedisListReceiveProxy::new(
-                client.get_multiplexed_async_connection().await?,
+                redis_pool.clone(),
                 redis_options.clone(),
                 burst_options.clone(),
                 worker_id,
@@ -201,12 +220,12 @@ impl RedisListProxy {
 
 impl RedisListSendProxy {
     pub fn new(
-        connection: MultiplexedConnection,
+        redis_pool: Arc<Pool>,
         redis_options: Arc<RedisListOptions>,
         burst_options: Arc<BurstOptions>,
     ) -> Self {
         Self {
-            connection,
+            redis_pool,
             redis_options,
             burst_options,
         }
@@ -216,26 +235,20 @@ impl RedisListSendProxy {
 #[async_trait]
 impl SendProxy for RedisListSendProxy {
     async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
-        Ok(send_direct(
-            self.connection.clone(),
-            msg,
-            dest,
-            &self.redis_options,
-            &self.burst_options,
-        )
-        .await?)
+        let mut con = self.redis_pool.get().await?;
+        Ok(send_direct(con, msg, dest, &self.redis_options, &self.burst_options).await?)
     }
 }
 
 impl RedisListReceiveProxy {
     pub fn new(
-        connection: MultiplexedConnection,
+        redis_pool: Arc<Pool>,
         redis_options: Arc<RedisListOptions>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
     ) -> Self {
         Self {
-            connection,
+            redis_pool,
             redis_options,
             burst_options,
             worker_id,
@@ -246,8 +259,9 @@ impl RedisListReceiveProxy {
 #[async_trait]
 impl ReceiveProxy for RedisListReceiveProxy {
     async fn recv(&self) -> Result<Message> {
+        let mut con = self.redis_pool.get().await?;
         let msg = read_redis(
-            &mut self.connection.clone(),
+            &mut con,
             &get_redis_list_key(
                 &self.redis_options.list_key_prefix,
                 &self.burst_options.burst_id,
@@ -255,7 +269,6 @@ impl ReceiveProxy for RedisListReceiveProxy {
             ),
         )
         .await?;
-
         Ok(msg)
     }
 }
@@ -359,7 +372,7 @@ where
     C: ConnectionLike + Send,
 {
     // log::debug!("waiting for message with key {:?}", key);
-    let (_, payload): (String, Vec<u8>) = connection.blpop(key, 0).await?;
+    let (_, payload): (String, Vec<u8>) = connection.blpop(key, 0.0).await?;
     // log::debug!("received message: {:?}", payload);
     let msg = Message::from(payload);
     Ok(msg)
