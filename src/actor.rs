@@ -207,4 +207,18 @@ impl MiddlewareActorHandle {
         let result = recv.blocking_recv().unwrap();
         return result;
     }
+
+    pub fn scatter(&self, data: Option<Vec<Bytes>>) -> Result<Option<Message>> {
+        let (send, recv) = oneshot::channel();
+
+        self.sender
+            .blocking_send(ActorMessage::Scatter {
+                payloads: data,
+                respond_to: send,
+            })
+            .unwrap();
+
+        let result = recv.blocking_recv().unwrap();
+        return result;
+    }
 }
