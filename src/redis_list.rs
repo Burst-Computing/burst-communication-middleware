@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 
-use deadpool_redis::{Config, Pool};
+use deadpool_redis::{Config, Pool, Runtime};
 use redis::{
     aio::{ConnectionLike, MultiplexedConnection},
     AsyncCommands, Client,
@@ -80,7 +80,7 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
             .builder()
             .unwrap()
             .max_size(group_size as usize)
-            // .runtime(Runtime::Tokio1)
+            .runtime(Runtime::Tokio1)
             .build()
             .unwrap();
         // let pool = conf.create_pool(Some(Runtime::Tokio1)).unwrap();
