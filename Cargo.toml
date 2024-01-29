@@ -24,6 +24,7 @@ aws-credential-types = { version = "1.0.0", features = [
     "hardcoded-credentials",
 ] }
 burst-message-relay = { path = "burst-message-relay" }
+deadpool-lapin = "0.11.0"
 
 [[example]]
 name = "hello_world"
