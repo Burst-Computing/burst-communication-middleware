@@ -34,6 +34,10 @@ enum ActorMessage {
         payload: Bytes,
         respond_to: oneshot::Sender<Result<Option<Vec<Message>>>>,
     },
+    AllToAll {
+        payload: Vec<Bytes>,
+        respond_to: oneshot::Sender<Result<Vec<Message>>>,
+    },
 }
 
 impl MiddlewareActor {
@@ -130,6 +134,21 @@ impl MiddlewareActor {
                     }
                 };
             }
+            ActorMessage::AllToAll {
+                payload,
+                respond_to,
+            } => {
+                let result = self.middleware.all_to_all(payload).await;
+                match respond_to.send(result) {
+                    Ok(_) => {}
+                    Err(_) => {
+                        log::error!(
+                            "Failed to send response to {}",
+                            self.middleware.info().worker_id
+                        );
+                    }
+                };
+            }
         }
     }
 }
@@ -205,6 +224,18 @@ impl MiddlewareActorHandle {
 
         self.sender.blocking_send(ActorMessage::Scatter {
             payloads: data,
+            respond_to: send,
+        })?;
+
+        let result = recv.blocking_recv()?;
+        return result;
+    }
+
+    pub fn all_to_all(&self, data: Vec<Bytes>) -> Result<Vec<Message>> {
+        let (send, recv) = oneshot::channel();
+
+        self.sender.blocking_send(ActorMessage::AllToAll {
+            payload: data,
             respond_to: send,
         })?;
 
