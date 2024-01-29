@@ -382,6 +382,11 @@ impl ReceiveProxy for RabbitMQReceiveProxy {
     async fn recv(&self) -> Result<Message> {
         let delivery = self.consumer.clone().try_next().await?;
         let delivery = delivery.ok_or("No message received")?;
+        log::debug!(
+            "RabbitMQ Basic consume, routing key: {:?}, exchange: {:?}",
+            delivery.routing_key,
+            delivery.exchange
+        );
         if self.rabbitmq_options.ack {
             delivery.ack(BasicAckOptions::default()).await?;
         }
@@ -505,6 +510,12 @@ async fn send_broadcast(
 async fn send_rabbit(pool: &Pool, msg: &Message, exchange: &str, routing_key: &str) -> Result<()> {
     let connection = pool.get().await?;
     let channel = connection.create_channel().await?;
+
+    log::debug!(
+        "RabbitMQ Basic publish, exchange: {:?}, routing_key: {:?}",
+        exchange,
+        routing_key
+    );
 
     channel
         .basic_publish(
