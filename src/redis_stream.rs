@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use deadpool_redis::{Config, Pool, Runtime};
 use redis::{
     aio::{ConnectionLike, MultiplexedConnection},
     streams::{StreamReadOptions, StreamReadReply},
@@ -68,10 +69,21 @@ impl SendReceiveFactory<RedisStreamOptions> for RedisStreamImpl {
         Box<dyn BroadcastSendProxy>,
     )> {
         let redis_options = Arc::new(redis_options);
-        let client = Client::open(redis_options.redis_uri.clone())?;
+        // create redis pool with deadpool
+        let group_size = burst_options
+            .group_ranges
+            .get(&burst_options.group_id)
+            .unwrap()
+            .len();
+        let pool = Config::from_url(redis_options.redis_uri.clone())
+            .builder()
+            .unwrap()
+            .max_size(group_size as usize)
+            .runtime(Runtime::Tokio1)
+            .build()
+            .unwrap();
 
         init_redis(
-            client.clone(),
             burst_options.clone(),
             redis_options.clone(),
             broadcast_proxy,
@@ -86,10 +98,10 @@ impl SendReceiveFactory<RedisStreamOptions> for RedisStreamImpl {
         let mut hmap = HashMap::new();
 
         futures::future::try_join_all(current_group.iter().map(|worker_id| {
-            let c = Client::open(redis_options.redis_uri.clone()).unwrap();
+            let p = pool.clone();
             let r = redis_options.clone();
             let b = burst_options.clone();
-            async move { RedisStreamProxy::new(c, r, b, *worker_id).await }
+            async move { RedisStreamProxy::new(p, r, b, *worker_id).await }
         }))
         .await?
         .into_iter()
@@ -100,10 +112,11 @@ impl SendReceiveFactory<RedisStreamOptions> for RedisStreamImpl {
             );
         });
 
+        let broadcast_client = Client::open(redis_options.redis_uri.clone())?;
         Ok((
             hmap,
             Box::new(RedisStreamBroadcastSendProxy::new(
-                client.get_multiplexed_async_connection().await?,
+                broadcast_client.get_multiplexed_async_connection().await?,
                 redis_options,
                 burst_options,
             )) as Box<dyn BroadcastSendProxy>,
@@ -112,12 +125,12 @@ impl SendReceiveFactory<RedisStreamOptions> for RedisStreamImpl {
 }
 
 async fn init_redis(
-    client: Client,
     burst_options: Arc<BurstOptions>,
     redis_options: Arc<RedisStreamOptions>,
     broadcast_proxy: Box<dyn BroadcastSendProxy>,
 ) -> Result<()> {
     // spawn task to receive broadcast messages and send them to the broadcast proxy
+    let client = Client::open(redis_options.redis_uri.clone())?;
     let mut connection = client.get_async_connection().await?;
     let broadcast_stream = get_broadcast_stream_name(
         &redis_options.broadcast_stream_prefix,
@@ -145,13 +158,13 @@ pub struct RedisStreamProxy {
 }
 
 pub struct RedisStreamSendProxy {
-    connection: MultiplexedConnection,
+    redis_pool: Pool,
     redis_options: Arc<RedisStreamOptions>,
     burst_options: Arc<BurstOptions>,
 }
 
 pub struct RedisStreamReceiveProxy {
-    connection: MultiplexedConnection,
+    redis_pool: Pool,
     redis_options: Arc<RedisStreamOptions>,
     burst_options: Arc<BurstOptions>,
     worker_id: u32,
@@ -182,7 +195,7 @@ impl ReceiveProxy for RedisStreamProxy {
 
 impl RedisStreamProxy {
     pub async fn new(
-        client: Client,
+        redis_pool: Pool,
         redis_options: Arc<RedisStreamOptions>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
@@ -190,12 +203,12 @@ impl RedisStreamProxy {
         Ok(Self {
             worker_id,
             sender: Box::new(RedisStreamSendProxy::new(
-                client.get_multiplexed_async_connection().await?,
+                redis_pool.clone(),
                 redis_options.clone(),
                 burst_options.clone(),
             )),
             receiver: Box::new(RedisStreamReceiveProxy::new(
-                client.get_multiplexed_async_connection().await?,
+                redis_pool.clone(),
                 redis_options.clone(),
                 burst_options.clone(),
                 worker_id,
@@ -207,25 +220,19 @@ impl RedisStreamProxy {
 #[async_trait]
 impl SendProxy for RedisStreamSendProxy {
     async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
-        Ok(send_direct(
-            self.connection.clone(),
-            msg,
-            dest,
-            &self.redis_options,
-            &self.burst_options,
-        )
-        .await?)
+        let con = self.redis_pool.get().await?;
+        Ok(send_direct(con, msg, dest, &self.redis_options, &self.burst_options).await?)
     }
 }
 
 impl RedisStreamSendProxy {
     pub fn new(
-        connection: MultiplexedConnection,
+        redis_pool: Pool,
         redis_options: Arc<RedisStreamOptions>,
         burst_options: Arc<BurstOptions>,
     ) -> Self {
         Self {
-            connection,
+            redis_pool,
             redis_options,
             burst_options,
         }
@@ -236,9 +243,9 @@ impl RedisStreamSendProxy {
 impl ReceiveProxy for RedisStreamReceiveProxy {
     async fn recv(&self) -> Result<Message> {
         let last_id = self.last_id.read().await.clone();
-
+        let mut con = self.redis_pool.get().await?;
         let (last_id, msg) = read_redis(
-            &mut self.connection.clone(),
+            &mut con,
             &get_direct_stream_name(
                 &self.redis_options.direct_stream_prefix,
                 &self.burst_options.burst_id,
@@ -256,13 +263,13 @@ impl ReceiveProxy for RedisStreamReceiveProxy {
 
 impl RedisStreamReceiveProxy {
     pub fn new(
-        connection: MultiplexedConnection,
+        redis_pool: Pool,
         redis_options: Arc<RedisStreamOptions>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
     ) -> Self {
         Self {
-            connection,
+            redis_pool,
             redis_options,
             burst_options,
             worker_id,
