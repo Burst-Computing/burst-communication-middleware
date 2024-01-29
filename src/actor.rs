@@ -54,7 +54,7 @@ impl MiddlewareActor {
             self.middleware.info().worker_id
         );
         while let Some(msg) = self.receiver.recv().await {
-            log::debug!("[Middleware Actor] Handling message: {:?}", msg);
+            // log::debug!("[Middleware Actor] Handling message: {:?}", msg);
             self.handle_message(msg).await;
         }
     }
