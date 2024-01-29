@@ -154,71 +154,61 @@ impl MiddlewareActorHandle {
     pub fn send(&self, dest: u32, data: Bytes) -> Result<()> {
         let (send, recv) = oneshot::channel();
 
-        self.sender
-            .blocking_send(ActorMessage::SendMessage {
-                payload: data,
-                worker_dest: dest,
-                respond_to: send,
-            })
-            .unwrap();
+        self.sender.blocking_send(ActorMessage::SendMessage {
+            payload: data,
+            worker_dest: dest,
+            respond_to: send,
+        })?;
 
-        let result = recv.blocking_recv().unwrap();
+        let result = recv.blocking_recv()?;
         return result;
     }
 
     pub fn recv(&self, from: u32) -> Result<Message> {
         let (send, recv) = oneshot::channel();
 
-        self.sender
-            .blocking_send(ActorMessage::ReceiveMessage {
-                from,
-                respond_to: send,
-            })
-            .unwrap();
+        self.sender.blocking_send(ActorMessage::ReceiveMessage {
+            from,
+            respond_to: send,
+        })?;
 
-        let result = recv.blocking_recv().unwrap();
+        let result = recv.blocking_recv()?;
         return result;
     }
 
     pub fn broadcast(&self, data: Option<Bytes>) -> Result<Message> {
         let (send, recv) = oneshot::channel();
 
-        self.sender
-            .blocking_send(ActorMessage::Broadcast {
-                payload: data,
-                respond_to: send,
-            })
-            .unwrap();
+        self.sender.blocking_send(ActorMessage::Broadcast {
+            payload: data,
+            respond_to: send,
+        })?;
 
-        let result = recv.blocking_recv().unwrap();
+        let result = recv.blocking_recv()?;
         return result;
     }
 
     pub fn gather(&self, data: Bytes) -> Result<Option<Vec<Message>>> {
         let (send, recv) = oneshot::channel();
 
-        self.sender
-            .blocking_send(ActorMessage::Gather {
-                payload: data,
-                respond_to: send,
-            })
-            .unwrap();
+        self.sender.blocking_send(ActorMessage::Gather {
+            payload: data,
+            respond_to: send,
+        })?;
 
-        let result = recv.blocking_recv().unwrap();
+        let result = recv.blocking_recv()?;
         return result;
     }
 
     pub fn scatter(&self, data: Option<Vec<Bytes>>) -> Result<Option<Message>> {
         let (send, recv) = oneshot::channel();
 
-        self.sender
-            .blocking_send(ActorMessage::Scatter {
-                payloads: data,
-                respond_to: send,
-            })
-            .unwrap();
+        self.sender.blocking_send(ActorMessage::Scatter {
+            payloads: data,
+            respond_to: send,
+        })?;
 
-        let result = recv.blocking_recv().unwrap();
+        let result = recv.blocking_recv()?;
         return result;
     }
 }

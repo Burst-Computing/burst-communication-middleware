@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 
-use deadpool_redis::{Config, Pool, Runtime};
+use deadpool_redis::{Config, Pool};
 use redis::{
     aio::{ConnectionLike, MultiplexedConnection},
     AsyncCommands, Client,
@@ -233,7 +233,7 @@ impl RedisListSendProxy {
 #[async_trait]
 impl SendProxy for RedisListSendProxy {
     async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
-        let mut con = self.redis_pool.get().await?;
+        let con = self.redis_pool.get().await?;
         Ok(send_direct(con, msg, dest, &self.redis_options, &self.burst_options).await?)
     }
 }
