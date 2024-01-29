@@ -1,3 +1,4 @@
+mod actor;
 mod burst_message_relay;
 mod chunk_store;
 mod counter;
@@ -11,6 +12,7 @@ mod tokio_channel;
 mod types;
 mod utils;
 
+pub use actor::*;
 pub use burst_message_relay::*;
 pub use middleware::*;
 pub use rabbitmq::*;

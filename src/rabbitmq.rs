@@ -408,6 +408,11 @@ impl RabbitMQSendProxy {
 impl ReceiveProxy for RabbitMQReceiveProxy {
     async fn recv(&self) -> Result<Message> {
         let delivery = self.consumer.clone().next().await.unwrap()?;
+        log::debug!(
+            "RabbitMQ Basic consume, routing key: {:?}, exchange: {:?}",
+            delivery.routing_key,
+            delivery.exchange
+        );
         if self.options.ack {
             self.channel
                 .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
@@ -548,6 +553,12 @@ async fn send_rabbit(
     fields.insert(
         "collective".into(),
         AMQPValue::LongUInt(msg.collective as u32),
+    );
+
+    log::debug!(
+        "RabbitMQ Basic publish, exchange: {:?}, routing_key: {:?}",
+        exchange,
+        routing_key
     );
 
     channel
