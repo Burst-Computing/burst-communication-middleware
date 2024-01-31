@@ -66,12 +66,14 @@ impl VecChunkedMessageBody {
 
 impl ChunkedMessageBody for VecChunkedMessageBody {
     fn insert(&mut self, chunk_id: u32, chunk: Bytes) {
-        self.array[chunk_id as usize] = chunk;
-        self.num_chunks_received += 1;
-        if self.num_chunks_received > self.num_chunks {
-            panic!("Received more chunks than expected");
-        } else if self.num_chunks_received == self.num_chunks {
-            self.is_complete = true;
+        if self.array[chunk_id as usize].is_empty() {
+            log::debug!("Inserting chunk {} of {}", chunk_id, self.num_chunks);
+            self.array[chunk_id as usize] = chunk;
+            self.num_chunks_received += 1;
+            if self.num_chunks_received == self.num_chunks {
+                log::debug!("Message is complete");
+                self.is_complete = true;
+            }
         }
     }
 

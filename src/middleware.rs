@@ -132,6 +132,7 @@ impl BurstMiddleware {
         LocalOptions: Send + Sync,
         RemoteOptions: Send + Sync,
     {
+        log::debug!("Creating proxies {:?}", options);
         let options = Arc::new(options);
         let current_group = options.group_ranges.get(&options.group_id).unwrap();
 

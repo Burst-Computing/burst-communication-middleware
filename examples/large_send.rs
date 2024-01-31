@@ -1,149 +1,123 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, RabbitMQMImpl, RabbitMQOptions, RedisListImpl, RedisListOptions,
-    S3Impl, S3Options, TokioChannelImpl, TokioChannelOptions,
+    BurstMiddleware, BurstOptions, MiddlewareActorHandle, RabbitMQMImpl, RabbitMQOptions,
+    RedisListImpl, RedisListOptions, RedisStreamImpl, RedisStreamOptions, S3Impl, S3Options,
+    TokioChannelImpl, TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
 use std::{
     collections::{HashMap, HashSet},
-    env, thread, vec,
+    env,
+    thread::{self, JoinHandle},
+    vec,
 };
 
-const PAYLOAD_SIZE: u32 = 256 * 1024 * 1024; // 256 MB
+const PAYLOAD_SIZE: usize = 256 * 1024 * 1024; // 256 MB
 
-#[tokio::main]
-async fn main() {
+fn handle_group(
+    group_id: String,
+    group: HashMap<String, HashSet<u32>>,
+    worker_id: u32,
+    tokio_runtime: &tokio::runtime::Runtime,
+) -> JoinHandle<()> {
+    let fut = tokio_runtime.spawn(BurstMiddleware::create_proxies::<
+        TokioChannelImpl,
+        RedisStreamImpl,
+        _,
+        _,
+    >(
+        BurstOptions::new(
+            "large_send".to_string(),
+            2,
+            group,
+            group_id,
+            true,
+            4 * 1024 * 1024,
+        ),
+        TokioChannelOptions::new()
+            .broadcast_channel_size(256)
+            .build(),
+        // RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+        //     .durable_queues(true)
+        //     .ack(true)
+        //     .build(),
+        // S3Options::new(env::var("S3_BUCKET").unwrap())
+        //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
+        //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
+        //     .session_token(Some(env::var("AWS_SESSION_TOKEN").unwrap()))
+        //     .region(env::var("S3_REGION").unwrap())
+        //     .endpoint(None)
+        //     .build(),
+        // RedisListOptions::new("redis://127.0.0.1".to_string()),
+        RedisStreamOptions::new("redis://127.0.0.1".to_string()),
+    ));
+    let mut proxies = tokio_runtime.block_on(fut).unwrap().unwrap();
+    let proxy = proxies.remove(&worker_id).unwrap();
+
+    let actor = MiddlewareActorHandle::new(proxy, &tokio_runtime);
+
+    let thread = thread::spawn(move || {
+        let worker_id = actor.info.worker_id;
+        info!("thread start: id={}", worker_id);
+        worker(actor);
+        info!("thread end: id={}", worker_id);
+    });
+    return thread;
+}
+
+fn main() {
     env_logger::init();
+
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
     let group_0 = vec![("0".to_string(), vec![0].into_iter().collect())]
         .into_iter()
         .collect::<HashMap<String, HashSet<u32>>>();
+
+    let g1 = handle_group("0".to_string(), group_0, 0, &tokio_runtime);
+
     let group_1 = vec![("1".to_string(), vec![1].into_iter().collect())]
         .into_iter()
         .collect::<HashMap<String, HashSet<u32>>>();
 
-    let p1 = match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
-        BurstOptions::new(
-            "hello_world".to_string(),
-            2,
-            group_0,
-            0.to_string(),
-            true,
-            1 * 1024 * 1024,
-        ),
-        TokioChannelOptions::new()
-            .broadcast_channel_size(256)
-            .build(),
-        RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-            .durable_queues(true)
-            .ack(true)
-            .build(),
-        // S3Options::new(env::var("S3_BUCKET").unwrap())
-        //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
-        //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
-        //     .session_token(Some(env::var("AWS_SESSION_TOKEN").unwrap()))
-        //     .region(env::var("S3_REGION").unwrap())
-        //     .endpoint(None)
-        //     .build(),
-        // RedisListOptions::new("redis://127.0.0.1".to_string()),
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            error!("{:?}", e);
-            panic!();
-        }
-    }
-    .remove(&0)
-    .unwrap();
+    let g2 = handle_group("1".to_string(), group_1, 1, &tokio_runtime);
 
-    let p2 = match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
-        BurstOptions::new(
-            "hello_world".to_string(),
-            2,
-            group_1,
-            1.to_string(),
-            true,
-            1 * 1024 * 1024,
-        ),
-        TokioChannelOptions::new()
-            .broadcast_channel_size(256)
-            .build(),
-        RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-            .durable_queues(true)
-            .ack(true)
-            .build(),
-        // S3Options::new(env::var("S3_BUCKET").unwrap())
-        //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
-        //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
-        //     .session_token(Some(env::var("AWS_SESSION_TOKEN").unwrap()))
-        //     .region(env::var("S3_REGION").unwrap())
-        //     .endpoint(None)
-        //     .build(),
-        // RedisListOptions::new("redis://127.0.0.1".to_string()),
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            error!("{:?}", e);
-            panic!();
-        }
-    }
-    .remove(&1)
-    .unwrap();
-
-    let thread_1 = thread::spawn(move || {
-        let worker_id = p1.info().worker_id;
-        info!("thread start: id={}", worker_id);
-        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = tokio_runtime.block_on(async { worker(p1).await.unwrap() });
-        info!("thread end: id={}", worker_id);
-        result
-    });
-
-    let thread_2 = thread::spawn(move || {
-        let worker_id = p2.info().worker_id;
-        info!("thread start: id={}", worker_id);
-        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let result = tokio_runtime.block_on(async { worker(p2).await.unwrap() });
-        info!("thread end: id={}", worker_id);
-        result
-    });
-
-    thread_1.join().unwrap();
-    thread_2.join().unwrap();
+    g1.join().unwrap();
+    g2.join().unwrap();
 }
 
-pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std::error::Error>> {
-    if burst_middleware.info().worker_id == 0 {
-        let body = vec![0; PAYLOAD_SIZE as usize];
-        let payload = Bytes::from(body);
+fn worker(burst_middleware: MiddlewareActorHandle) {
+    if burst_middleware.info.worker_id == 0 {
+        info!("worker {} sending message", burst_middleware.info.worker_id);
+        let payload = Bytes::from(vec![0; PAYLOAD_SIZE]);
+        burst_middleware.send(1, payload).unwrap();
 
         info!(
-            "worker {} sending message with size {}",
-            burst_middleware.info().worker_id,
-            payload.len()
+            "worker {} waiting for response...",
+            burst_middleware.info.worker_id
         );
-        burst_middleware.send(1, payload).await.unwrap();
+        burst_middleware.recv(1).unwrap();
     } else {
         info!(
             "worker {} waiting for message...",
-            burst_middleware.info().worker_id
+            burst_middleware.info.worker_id
         );
-        let message = burst_middleware.recv(0).await.unwrap();
+        let message = burst_middleware.recv(0).unwrap();
         info!(
-            "worker {} received message with size {}",
-            burst_middleware.info().worker_id,
+            "worker {} received message with size {:?}",
+            burst_middleware.info.worker_id,
             message.data.len()
         );
+        let response = "bye!".to_string();
+        let payload = Bytes::from(response);
+        info!(
+            "worker {} sending response",
+            burst_middleware.info.worker_id
+        );
+        burst_middleware.send(0, payload).unwrap();
+        info!("worker {} done!", burst_middleware.info.worker_id);
     }
-    Ok(())
 }
