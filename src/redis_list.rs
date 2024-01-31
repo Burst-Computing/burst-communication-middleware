@@ -114,7 +114,7 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
                     .await
                     .unwrap();
                 let msg = Message::from((header, payload));
-                broadcast_proxy.broadcast_send(&msg).await.unwrap();
+                broadcast_proxy.broadcast_send(msg).await.unwrap();
             }
         });
 
@@ -180,7 +180,7 @@ impl SendReceiveProxy for RedisListProxy {}
 
 #[async_trait]
 impl SendProxy for RedisListProxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         self.sender.send(dest, msg).await
     }
 }
@@ -232,7 +232,7 @@ impl RedisListSendProxy {
 
 #[async_trait]
 impl SendProxy for RedisListSendProxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         let con = self.redis_pool.get().await?;
         Ok(send_direct(con, msg, dest, &self.redis_options, &self.burst_options).await?)
     }
@@ -287,7 +287,7 @@ impl RedisListBroadcastSendProxy {
 
 #[async_trait]
 impl BroadcastSendProxy for RedisListBroadcastSendProxy {
-    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
+    async fn broadcast_send(&self, msg: Message) -> Result<()> {
         let mut con = self.connection.clone();
 
         let bcast_key = format!(
@@ -295,7 +295,7 @@ impl BroadcastSendProxy for RedisListBroadcastSendProxy {
             self.burst_options.burst_id,
             uuid::Uuid::new_v4().to_string()
         );
-        let [header, payload]: [&[u8]; 2] = msg.into();
+        let [header, payload]: [&[u8]; 2] = (&msg).into();
         log::debug!("sending message: {:?}", payload);
         con.set(format!("{}-header", bcast_key), &header).await?;
         con.set(format!("{}-payload", bcast_key), &payload).await?;
@@ -326,7 +326,7 @@ impl BroadcastSendProxy for RedisListBroadcastSendProxy {
 
 async fn send_direct<C>(
     connection: C,
-    msg: &Message,
+    msg: Message,
     dest: u32,
     redis_options: &RedisListOptions,
     burst_options: &BurstOptions,
@@ -336,7 +336,7 @@ where
 {
     Ok(send_redis(
         connection,
-        msg,
+        &msg,
         get_redis_list_key(
             &redis_options.list_key_prefix,
             &burst_options.burst_id,

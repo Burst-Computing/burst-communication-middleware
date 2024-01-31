@@ -140,9 +140,8 @@ pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std
         );
         let message = burst_middleware.recv(0).await.unwrap();
         info!(
-            "worker {} received message {:?} with size {}",
+            "worker {} received message with size {}",
             burst_middleware.info().worker_id,
-            message,
             message.data.len()
         );
     }

@@ -143,7 +143,7 @@ impl BroadcastProxy for TokioChannelProxy {}
 
 #[async_trait]
 impl BroadcastSendProxy for TokioChannelProxy {
-    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
+    async fn broadcast_send(&self, msg: Message) -> Result<()> {
         if msg.collective != CollectiveType::Broadcast {
             return Err("Cannot send non-broadcast message to broadcast".into());
         } else {
@@ -164,7 +164,7 @@ impl SendReceiveProxy for TokioChannelProxy {}
 
 #[async_trait]
 impl SendProxy for TokioChannelProxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         self.sender.send(dest, msg).await
     }
 }
@@ -197,7 +197,7 @@ impl TokioChannelProxy {
 
 #[async_trait]
 impl SendProxy for TokioChannelSendProxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         if msg.collective == CollectiveType::Broadcast {
             Err("Cannot send broadcast message to a single destination".into())
         } else {
@@ -253,7 +253,7 @@ impl TokioChannelBroadcastProxy {
 
 #[async_trait]
 impl BroadcastSendProxy for TokioChannelBroadcastProxy {
-    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
+    async fn broadcast_send(&self, msg: Message) -> Result<()> {
         self.broadcast_sender.broadcast_send(msg).await
     }
 }
@@ -267,7 +267,7 @@ impl BroadcastReceiveProxy for TokioChannelBroadcastProxy {
 
 #[async_trait]
 impl BroadcastSendProxy for TokioChannelBroadcastSendProxy {
-    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
+    async fn broadcast_send(&self, msg: Message) -> Result<()> {
         if msg.collective != CollectiveType::Broadcast {
             Err("Cannot send non-broadcast message to broadcast".into())
         } else {

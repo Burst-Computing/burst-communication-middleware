@@ -294,7 +294,7 @@ async fn init_rabbit(
                     .unwrap();
             }
             let msg = get_message(delivery);
-            broadcast_proxy.broadcast_send(&msg).await.unwrap();
+            broadcast_proxy.broadcast_send(msg).await.unwrap();
         }
     });
 
@@ -329,7 +329,7 @@ impl SendReceiveProxy for RabbitMQProxy {}
 
 #[async_trait]
 impl SendProxy for RabbitMQProxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         self.sender.send(dest, msg).await
     }
 }
@@ -373,7 +373,7 @@ impl RabbitMQProxy {
 
 #[async_trait]
 impl SendProxy for RabbitMQSendProxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         if msg.collective == CollectiveType::Broadcast {
             Err("Cannot send broadcast message to a single destination".into())
         } else {
@@ -439,7 +439,7 @@ impl RabbitMQBroadcastSendProxy {
 
 #[async_trait]
 impl BroadcastSendProxy for RabbitMQBroadcastSendProxy {
-    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
+    async fn broadcast_send(&self, msg: Message) -> Result<()> {
         if msg.collective != CollectiveType::Broadcast {
             Err("Cannot send non-broadcast message to broadcast".into())
         } else {
@@ -451,7 +451,7 @@ impl BroadcastSendProxy for RabbitMQBroadcastSendProxy {
                     .map(|dest| {
                         send_broadcast(
                             &self.channel,
-                            msg,
+                            msg.clone(),
                             dest,
                             &self.rabbitmq_options,
                             &self.burst_options,
@@ -497,7 +497,7 @@ impl RabbitMQReceiveProxy {
 
 async fn send_direct(
     channel: &Channel,
-    msg: &Message,
+    msg: Message,
     dest: u32,
     rabbitmq_options: &RabbitMQOptions,
     burst_options: &BurstOptions,
@@ -520,7 +520,7 @@ async fn send_direct(
 
 async fn send_broadcast(
     channel: &Channel,
-    msg: &Message,
+    msg: Message,
     dest: &str,
     rabbitmq_options: &RabbitMQOptions,
     burst_options: &BurstOptions,
@@ -540,7 +540,7 @@ async fn send_broadcast(
 
 async fn send_rabbit(
     channel: &Channel,
-    msg: &Message,
+    msg: Message,
     exchange: &str,
     routing_key: &str,
 ) -> Result<()> {
