@@ -263,7 +263,7 @@ impl SendReceiveFactory<S3Options> for S3Impl {
                             collective: CollectiveType::Broadcast,
                             data: Bytes::from(bytes),
                         };
-                        broadcast_proxy.broadcast_send(&msg).await.unwrap();
+                        broadcast_proxy.broadcast_send(msg).await.unwrap();
                         received_messages.insert(new_key);
                     }
                 }
@@ -311,7 +311,7 @@ impl SendReceiveProxy for S3Proxy {}
 
 #[async_trait]
 impl SendProxy for S3Proxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         self.sender.send(dest, msg).await
     }
 }
@@ -365,7 +365,7 @@ impl S3SendProxy {
 
 #[async_trait]
 impl SendProxy for S3SendProxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         let byte_stream = ByteStream::from(msg.data.clone());
         let key = format!(
             "{}/worker-{}/{}",
@@ -512,7 +512,7 @@ impl S3BroadcastSendProxy {
 
 #[async_trait]
 impl BroadcastSendProxy for S3BroadcastSendProxy {
-    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
+    async fn broadcast_send(&self, msg: Message) -> Result<()> {
         if !self._s3_options.enable_broadcast {
             panic!("Broadcast not enabled");
         }

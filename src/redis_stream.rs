@@ -144,7 +144,7 @@ async fn init_redis(
                 .await
                 .unwrap();
             last_broadcast_id = last_id;
-            broadcast_proxy.broadcast_send(&msg).await.unwrap();
+            broadcast_proxy.broadcast_send(msg).await.unwrap();
         }
     });
 
@@ -181,7 +181,7 @@ impl SendReceiveProxy for RedisStreamProxy {}
 
 #[async_trait]
 impl SendProxy for RedisStreamProxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         self.sender.send(dest, msg).await
     }
 }
@@ -219,7 +219,7 @@ impl RedisStreamProxy {
 
 #[async_trait]
 impl SendProxy for RedisStreamSendProxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         let con = self.redis_pool.get().await?;
         Ok(send_direct(con, msg, dest, &self.redis_options, &self.burst_options).await?)
     }
@@ -294,10 +294,11 @@ impl RedisStreamBroadcastSendProxy {
 
 #[async_trait]
 impl BroadcastSendProxy for RedisStreamBroadcastSendProxy {
-    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
+    async fn broadcast_send(&self, msg: Message) -> Result<()> {
         if msg.collective != CollectiveType::Broadcast {
             Err("Cannot send non-broadcast message to broadcast".into())
         } else {
+            let msg = &msg;
             futures::future::try_join_all(
                 self.burst_options
                     .group_ranges
@@ -321,7 +322,7 @@ impl BroadcastSendProxy for RedisStreamBroadcastSendProxy {
 
 async fn send_direct<C>(
     connection: C,
-    msg: &Message,
+    msg: Message,
     dest: u32,
     redis_options: &RedisStreamOptions,
     burst_options: &BurstOptions,
@@ -331,7 +332,7 @@ where
 {
     Ok(send_redis(
         connection,
-        msg,
+        &msg,
         &get_direct_stream_name(
             &redis_options.direct_stream_prefix,
             &burst_options.burst_id,

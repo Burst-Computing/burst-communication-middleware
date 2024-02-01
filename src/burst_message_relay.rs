@@ -102,7 +102,7 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
                 loop {
                     let data = client.broadcast(b.group_id.to_string()).await;
                     let msg = Message::from(data);
-                    broadcast_proxy.broadcast_send(&msg).await.unwrap();
+                    broadcast_proxy.broadcast_send(msg).await.unwrap();
                 }
             }
         });
@@ -138,7 +138,7 @@ impl SendReceiveProxy for StreamServerProxy {}
 
 #[async_trait]
 impl SendProxy for StreamServerProxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         self.sender.send(dest, msg).await
     }
 }
@@ -167,11 +167,11 @@ impl StreamServerProxy {
 
 #[async_trait]
 impl SendProxy for StreamServerSendProxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         if msg.collective == CollectiveType::Broadcast {
             Err("Cannot send broadcast message to a single destination".into())
         } else {
-            let data: [&[u8]; 2] = msg.into();
+            let data: [&[u8]; 2] = (&msg).into();
             self.client.lock().await.send_refs(dest, &data).await;
             Ok(())
         }
@@ -213,11 +213,11 @@ impl StreamServerReceiveProxy {
 
 #[async_trait]
 impl BroadcastSendProxy for StreamServerBroadcastProxy {
-    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
+    async fn broadcast_send(&self, msg: Message) -> Result<()> {
         if msg.collective != CollectiveType::Broadcast {
             Err("Cannot send non-broadcast message to broadcast".into())
         } else {
-            let data: [&[u8]; 2] = msg.into();
+            let data: [&[u8]; 2] = (&msg).into();
             let mut client = self.client.lock().await;
             for dest in self
                 .burst_options

@@ -28,7 +28,7 @@ enum ActorMessage {
     },
     Scatter {
         payloads: Option<Vec<Bytes>>,
-        respond_to: oneshot::Sender<Result<Option<Message>>>,
+        respond_to: oneshot::Sender<Result<Message>>,
     },
     Gather {
         payload: Bytes,
@@ -219,7 +219,7 @@ impl MiddlewareActorHandle {
         return result;
     }
 
-    pub fn scatter(&self, data: Option<Vec<Bytes>>) -> Result<Option<Message>> {
+    pub fn scatter(&self, data: Option<Vec<Bytes>>) -> Result<Message> {
         let (send, recv) = oneshot::channel();
 
         self.sender.blocking_send(ActorMessage::Scatter {

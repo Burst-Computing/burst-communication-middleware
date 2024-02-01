@@ -275,7 +275,7 @@ async fn init_rabbit(
                     .unwrap();
             }
             let msg = get_message(delivery);
-            broadcast_proxy.broadcast_send(&msg).await.unwrap();
+            broadcast_proxy.broadcast_send(msg).await.unwrap();
         }
     });
 
@@ -309,7 +309,7 @@ impl SendReceiveProxy for RabbitMQProxy {}
 
 #[async_trait]
 impl SendProxy for RabbitMQProxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         self.sender.send(dest, msg).await
     }
 }
@@ -347,13 +347,13 @@ impl RabbitMQProxy {
 
 #[async_trait]
 impl SendProxy for RabbitMQSendProxy {
-    async fn send(&self, dest: u32, msg: &Message) -> Result<()> {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         if msg.collective == CollectiveType::Broadcast {
             Err("Cannot send broadcast message to a single destination".into())
         } else {
             send_direct(
                 &self.pool,
-                msg,
+                &msg,
                 dest,
                 &self.rabbitmq_options,
                 &self.burst_options,
@@ -410,12 +410,18 @@ impl RabbitMQBroadcastSendProxy {
 
 #[async_trait]
 impl BroadcastSendProxy for RabbitMQBroadcastSendProxy {
-    async fn broadcast_send(&self, msg: &Message) -> Result<()> {
+    async fn broadcast_send(&self, msg: Message) -> Result<()> {
         log::debug!("BROADCAST BROADCAST BROADCAST");
         if msg.collective != CollectiveType::Broadcast {
             Err("Cannot send non-broadcast message to broadcast".into())
         } else {
-            send_broadcast(&self.pool, msg, &self.rabbitmq_options, &self.burst_options).await
+            send_broadcast(
+                &self.pool,
+                &msg,
+                &self.rabbitmq_options,
+                &self.burst_options,
+            )
+            .await
         }
     }
 }
