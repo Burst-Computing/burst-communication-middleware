@@ -322,11 +322,10 @@ impl BurstMiddleware {
             gathered.push(msg);
 
             // create a new hashset with all worker ids except self
-            let mut sender_ids =
-                HashSet::<u32>::from_iter((0..self.options.burst_size).into_iter())
-                    .difference(&HashSet::from_iter(vec![self.worker_id]))
-                    .map(|id| *id)
-                    .collect::<HashSet<u32>>();
+            let sender_ids = HashSet::<u32>::from_iter((0..self.options.burst_size).into_iter())
+                .difference(&HashSet::from_iter(vec![self.worker_id]))
+                .map(|id| *id)
+                .collect::<HashSet<u32>>();
             let messages = self
                 .get_messages(&CollectiveType::Gather, counter, sender_ids)
                 .await?;
@@ -460,7 +459,7 @@ impl BurstMiddleware {
                 // do remote send with chunking if enabled
                 let chunked_messages = chunk_message(&msg, self.message_chunk_size);
                 log::debug!("Chunked message in {} parts", chunked_messages.len());
-                self.send_messages_to(to, chunked_messages).await;
+                self.send_messages_to(to, chunked_messages).await?;
             } else {
                 // do remote send in one chunk
                 return self.remote_send_receive.send(to, msg).await;
