@@ -534,33 +534,95 @@ impl BurstMiddleware {
             collective,
             counter
         );
-        loop {
-            // Check if complete message is in buffer
-            if let Some(msg) = self.message_store.get(&from, collective, &counter) {
-                return Ok(msg);
-            };
 
-            // Block and receive next message
-            let proxy = if self.group.contains(&from) {
-                &self.local_send_receive
-            } else {
-                &self.remote_send_receive
-            };
-            let msg = proxy.recv().await?;
+        // Check if complete message is in buffer
+        if let Some(msg) = self.message_store.get(&from, collective, &counter) {
+            return Ok(msg);
+        };
 
-            log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
+        // Block and receive next message
+        let proxy = if self.group.contains(&from) {
+            &self.local_send_receive
+        } else {
+            &self.remote_send_receive
+        };
+        let msg = proxy.recv().await?;
 
-            // Check if this is the message we are waiting for
-            if msg.num_chunks == 1
-                && msg.counter == counter
-                && msg.collective == *collective
-                && msg.sender_id == from
-            {
-                return Ok(msg);
+        log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
+
+        // Check if this is the message we are waiting for
+        if msg.num_chunks == 1
+            && msg.counter == counter
+            && msg.collective == *collective
+            && msg.sender_id == from
+        {
+            return Ok(msg);
+        }
+
+        if self.enable_message_chunking {
+            let missing_chunks = msg.num_chunks - 1;
+            self.message_store.insert(msg);
+
+            log::debug!(
+                "[Worker {}] Witing for {} missing chunks",
+                self.worker_id,
+                missing_chunks
+            );
+
+            // we will expect, at least, N - 1 more messages, where N is the number of chunks
+            let mut futures = (0..missing_chunks)
+                .map(|_| Self::proxy_recv(from, Arc::clone(proxy)))
+                .map(tokio::spawn)
+                .collect::<FuturesUnordered<_>>();
+
+            // Loop until all chunks are received
+            while let Some(fut) = futures.next().await {
+                match fut {
+                    Ok((id, fut_res)) => {
+                        let msg = fut_res?;
+                        log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
+
+                        if msg.counter != counter || msg.collective != *collective {
+                            // we got a message with another collective or counter, we will need to receive yet another message
+                            futures.push(tokio::spawn(Self::proxy_recv(id, Arc::clone(proxy))));
+                        }
+
+                        self.message_store.insert(msg);
+                    }
+                    Err(e) => {
+                        log::error!("Error receiving message {:?}", e);
+                    }
+                }
             }
 
-            // Received either a partial message, or other collective message, put it into buffer
-            self.message_store.insert(msg);
+            log::debug!("[Worker {}] received all chunks", self.worker_id);
+
+            // at this point, we should have all chunks in the buffer
+            if let Some(msg) = self.message_store.get(&from, collective, &counter) {
+                return Ok(msg);
+            } else {
+                // something went wrong
+                // TODO try receiving more messages?
+                return Err("Waited for all chunks but some are missing".into());
+            }
+        } else {
+            // got a message with another collective or counter, loop until we receive what we want
+            loop {
+                let msg = proxy.recv().await?;
+                log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
+
+                // Check if this is the message we are waiting for
+                if msg.num_chunks == 1
+                    && msg.counter == counter
+                    && msg.collective == *collective
+                    && msg.sender_id == from
+                {
+                    return Ok(msg);
+                } else {
+                    // If not, it into buffer and consume next message
+                    self.message_store.insert(msg);
+                }
+            }
         }
     }
 

@@ -22,7 +22,7 @@ fn handle_group(
 ) -> JoinHandle<()> {
     let fut = tokio_runtime.spawn(BurstMiddleware::create_proxies::<
         TokioChannelImpl,
-        RedisStreamImpl,
+        RabbitMQMImpl,
         _,
         _,
     >(
@@ -37,10 +37,10 @@ fn handle_group(
         TokioChannelOptions::new()
             .broadcast_channel_size(256)
             .build(),
-        // RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-        //     .durable_queues(true)
-        //     .ack(true)
-        //     .build(),
+        RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+            .durable_queues(true)
+            .ack(true)
+            .build(),
         // S3Options::new(env::var("S3_BUCKET").unwrap())
         //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
         //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
@@ -49,7 +49,7 @@ fn handle_group(
         //     .endpoint(None)
         //     .build(),
         // RedisListOptions::new("redis://127.0.0.1".to_string()),
-        RedisStreamOptions::new("redis://127.0.0.1".to_string()),
+        // RedisStreamOptions::new("redis://127.0.0.1".to_string()),
     ));
     let mut proxies = tokio_runtime.block_on(fut).unwrap().unwrap();
     let proxy = proxies.remove(&worker_id).unwrap();
