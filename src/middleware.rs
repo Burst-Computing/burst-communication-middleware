@@ -249,18 +249,17 @@ impl BurstMiddleware {
         // If root worker, broadcast
         if self.worker_id == ROOT_ID {
             let data = data.expect("Root worker must send data");
-            let chunk_id = 0;
-            let num_chunks = 1;
 
             let msg = Message {
                 sender_id: self.worker_id,
-                chunk_id,
-                num_chunks,
+                chunk_id: 0,
+                num_chunks: 1,
                 counter,
                 collective: CollectiveType::Broadcast,
                 data,
             };
 
+            // for local send we do in one chunk only
             let local_fut = self.local_broadcast.broadcast_send(msg.clone());
 
             if self.enable_message_chunking {
@@ -280,22 +279,14 @@ impl BurstMiddleware {
             }
 
             local_fut.await?;
-        } else {
-            // If there is a message in the buffer, return it
-            if let Some(msg) =
-                self.message_buffer
-                    .get(&ROOT_ID, &CollectiveType::Broadcast, &counter)
-            {
-                // Increment broadcast counter
-                self.increment_counter(&CollectiveType::Broadcast);
-                return Ok(msg);
-            }
         }
 
         // Broadcast messages will only be received via the local channel
         // Remote broadcast messages will be sent to the local channel
         // by a separate thread
-        let m = self.receive_broadcast_message(counter).await?;
+        // Root worker and local group workers will receive the broadcast message
+        // via the local channel
+        let m = self.get_broadcast_message(counter).await?;
 
         // Increment broadcast counter
         self.increment_counter(&CollectiveType::Broadcast);
@@ -620,6 +611,10 @@ impl BurstMiddleware {
                 } else {
                     // If not, it into buffer and consume next message
                     self.message_buffer.insert(msg);
+                    log::debug!(
+                        "[Worker {}] Put message in buffer, get next message",
+                        self.worker_id
+                    )
                 }
             }
         }
@@ -697,6 +692,125 @@ impl BurstMiddleware {
         return Ok(messages);
     }
 
+    // TODO -- this is a copy of get_message, refactor
+    async fn get_broadcast_message(&mut self, counter: u32) -> Result<Message> {
+        // Check if complete message is in buffer
+        if let Some(msg) = self
+            .message_buffer
+            .get(&ROOT_ID, &CollectiveType::Broadcast, &counter)
+        {
+            return Ok(msg);
+        };
+
+        // Block and receive next message
+        let msg = Self::broadcast_recv(Arc::clone(&self.local_broadcast)).await?;
+        log::debug!(
+            "[Worker {}] received broadcast message {:?}",
+            self.worker_id,
+            msg
+        );
+
+        // Check if this is the message we are waiting for
+        if msg.num_chunks == 1 && msg.counter == counter {
+            return Ok(msg);
+        }
+
+        if self.enable_message_chunking {
+            let missing_chunks = msg.num_chunks - 1;
+            self.message_buffer.insert(msg);
+
+            log::debug!(
+                "[Worker {}] Broadcast -- Waiting for {} missing chunks",
+                self.worker_id,
+                missing_chunks
+            );
+
+            // we will expect, at least, N - 1 more messages, where N is the number of chunks
+            let mut futures = (0..missing_chunks)
+                .map(|_| Self::broadcast_recv(Arc::clone(&self.local_broadcast)))
+                .map(tokio::spawn)
+                .collect::<FuturesUnordered<_>>();
+
+            // Loop until all chunks are received
+            while let Some(fut) = futures.next().await {
+                match fut {
+                    Ok(fut_res) => {
+                        let msg = fut_res?;
+                        log::debug!(
+                            "[Worker {}] received broadcast message {:?}",
+                            self.worker_id,
+                            msg
+                        );
+
+                        if msg.counter != counter {
+                            // we got a message with another counter, we will need to receive yet another message
+                            futures.push(tokio::spawn(Self::broadcast_recv(Arc::clone(
+                                &self.local_broadcast,
+                            ))));
+                        }
+
+                        self.message_buffer.insert(msg);
+                    }
+                    Err(e) => {
+                        log::error!("Error receiving message {:?}", e);
+                    }
+                }
+            }
+
+            log::debug!("[Worker {}] received all broadcast chunks", self.worker_id);
+
+            // at this point, we should have all chunks in the buffer
+            if let Some(msg) =
+                self.message_buffer
+                    .get(&ROOT_ID, &CollectiveType::Broadcast, &counter)
+            {
+                return Ok(msg);
+            } else {
+                // something went wrong
+                // TODO try receiving more messages?
+                return Err("(Broadcast) Waited for all chunks but some are missing".into());
+            }
+        } else {
+            // got a message with another counter, loop until we receive what we want
+            loop {
+                let msg = self.local_broadcast.broadcast_recv().await?;
+                log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
+
+                // Check if this is the message we are waiting for
+                if msg.num_chunks == 1 && msg.counter == counter {
+                    return Ok(msg);
+                } else {
+                    // If not, it into buffer and consume next message
+                    self.message_buffer.insert(msg);
+                    log::debug!(
+                        "[Worker {}] Broadcast -- Put message in buffer, get next message",
+                        self.worker_id
+                    )
+                }
+            }
+        }
+
+        // loop {
+        //     // receive blocking
+        //     let msg = Self::broadcast_recv(Arc::clone(&self.local_broadcast)).await?;
+        //     log::debug!("worker {} received message {:?}", self.worker_id, msg);
+
+        //     if msg.num_chunks == 1 && msg.counter == counter {
+        //         return Ok(msg);
+        //     }
+
+        //     let sender_id = msg.sender_id;
+        //     self.message_store.insert(msg);
+        //     if let Some(msg) =
+        //         self.message_store
+        //             .get(&sender_id, &CollectiveType::Broadcast, &counter)
+        //     {
+        //         log::debug!("Got complete message {:?}", msg);
+        //         return Ok(msg);
+        //     };
+        // }
+    }
+
     async fn proxy_recv(from: u32, proxy: Arc<dyn SendReceiveProxy>) -> (u32, Result<Message>) {
         (from, proxy.recv().await)
     }
@@ -711,35 +825,6 @@ impl BurstMiddleware {
 
     async fn broadcast_recv(proxy: Arc<dyn BroadcastProxy>) -> Result<Message> {
         proxy.broadcast_recv().await
-    }
-
-    async fn receive_broadcast_message(&mut self, counter: u32) -> Result<Message> {
-        loop {
-            // receive blocking
-            let msg = Self::broadcast_recv(Arc::clone(&self.local_broadcast)).await?;
-            log::debug!("worker {} received message {:?}", self.worker_id, msg);
-
-            if msg.num_chunks == 1 && msg.counter == counter {
-                return Ok(msg);
-            }
-
-            let sender_id = msg.sender_id;
-            self.message_buffer.insert(msg);
-            if let Some(msg) =
-                self.message_buffer
-                    .get(&sender_id, &CollectiveType::Broadcast, &counter)
-            {
-                log::debug!("Got complete message {:?}", msg);
-                return Ok(msg);
-            };
-
-            // let msg = self.receive_broadcast().await?;
-            // if msg.counter == counter && msg.collective == CollectiveType::Broadcast {
-            // return Ok(msg);
-            // } else {
-            // self.message_store.insert(msg);
-            // }
-        }
     }
 
     fn get_counter(&self, collective: &CollectiveType) -> u32 {
