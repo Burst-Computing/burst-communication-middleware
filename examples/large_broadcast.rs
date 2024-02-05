@@ -1,6 +1,7 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, Message, RabbitMQMImpl, RabbitMQOptions, RedisListImpl,
-    RedisListOptions, RedisStreamOptions, S3Impl, S3Options, TokioChannelImpl, TokioChannelOptions,
+    BurstMiddleware, BurstOptions, Message, MiddlewareActorHandle, RabbitMQMImpl, RabbitMQOptions,
+    RedisListImpl, RedisListOptions, RedisStreamOptions, S3Impl, S3Options, TokioChannelImpl,
+    TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -11,11 +12,15 @@ use std::{
 
 const BURST_SIZE: u32 = 64;
 const GROUPS: u32 = 4;
-const PAYLOAD_SIZE: u32 = 256 * 1024 * 1024; // 256 MB
+const PAYLOAD_SIZE: usize = 256 * 1024 * 1024; // 256MB
 
-#[tokio::main]
-async fn main() {
+fn main() {
     env_logger::init();
+
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
     if BURST_SIZE % GROUPS != 0 {
         panic!("BURST_SIZE must be divisible by GROPUS");
@@ -59,24 +64,25 @@ async fn main() {
         //     .endpoint(None)
         //     .enable_broadcast(true)
         //     .build();
-        // let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
+        // let redislist_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
 
-        let proxies =
-            match BurstMiddleware::create_proxies::<TokioChannelImpl, RabbitMQMImpl, _, _>(
-                burst_options,
-                channel_options,
-                backend_options,
-            )
-            .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("{:?}", e);
-                    panic!();
-                }
-            };
+        let fut = tokio_runtime.spawn(BurstMiddleware::create_proxies::<
+            TokioChannelImpl,
+            RabbitMQMImpl,
+            _,
+            _,
+        >(burst_options, channel_options, backend_options));
+        let proxies = tokio_runtime.block_on(fut).unwrap().unwrap();
 
-        let group_threads = group(proxies).await;
+        let actors = proxies
+            .into_iter()
+            .map(|(worker_id, middleware)| {
+                let actor = MiddlewareActorHandle::new(middleware, &tokio_runtime);
+                (worker_id, actor)
+            })
+            .collect::<HashMap<u32, MiddlewareActorHandle>>();
+
+        let group_threads = group(actors);
         threads.extend(group_threads);
     }
 
@@ -85,18 +91,13 @@ async fn main() {
     }
 }
 
-async fn group(proxies: HashMap<u32, BurstMiddleware>) -> Vec<std::thread::JoinHandle<()>> {
+fn group(proxies: HashMap<u32, MiddlewareActorHandle>) -> Vec<std::thread::JoinHandle<()>> {
     let mut threads = Vec::with_capacity(proxies.len());
     for (worker_id, proxy) in proxies {
         let thread = thread::spawn(move || {
             info!("thread start: id={}", worker_id);
-            let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let result = tokio_runtime.block_on(async { worker(proxy).await.unwrap() });
+            worker(proxy);
             info!("thread end: id={}", worker_id);
-            result
         });
         threads.push(thread);
     }
@@ -104,30 +105,27 @@ async fn group(proxies: HashMap<u32, BurstMiddleware>) -> Vec<std::thread::JoinH
     return threads;
 }
 
-pub async fn worker(burst_middleware: BurstMiddleware) -> Result<(), Box<dyn std::error::Error>> {
-    let res: Message;
-    if burst_middleware.info().worker_id == 0 {
-        let data = Bytes::from(vec![0; PAYLOAD_SIZE as usize]);
+fn worker(burst_middleware: MiddlewareActorHandle) {
+    let res = if burst_middleware.info.worker_id == 0 {
+        let payload = Bytes::from(vec![0; PAYLOAD_SIZE]);
         log::info!(
-            "worker {} (root)  => sending broadcast message with size {}",
-            burst_middleware.info().worker_id,
-            data.len()
+            "worker {} (root)  => sending broadcast with size {}",
+            burst_middleware.info.worker_id,
+            payload.len()
         );
-        res = burst_middleware.broadcast(Some(data)).await.unwrap();
+        burst_middleware.broadcast(Some(payload)).unwrap()
     } else {
         log::info!(
             "worker {} (group {}) => waiting for broadcast",
-            burst_middleware.info().worker_id,
-            burst_middleware.info().group_id
+            burst_middleware.info.worker_id,
+            burst_middleware.info.group_id
         );
-        res = burst_middleware.broadcast(None).await.unwrap();
-    }
-
+        burst_middleware.broadcast(None).unwrap()
+    };
     log::info!(
-        "worker {} (group {}) => received broadcast message {:?}",
-        burst_middleware.info().worker_id,
-        burst_middleware.info().group_id,
-        res
+        "worker {} (group {}) => received broadcast message with size {}",
+        burst_middleware.info.worker_id,
+        burst_middleware.info.group_id,
+        res.data.len()
     );
-    Ok(())
 }
