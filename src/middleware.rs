@@ -98,7 +98,6 @@ impl BurstOptions {
     }
 }
 
-#[derive(Clone)]
 pub struct BurstMiddleware {
     options: Arc<BurstOptions>,
 
@@ -111,11 +110,11 @@ pub struct BurstMiddleware {
     local_broadcast: Arc<dyn BroadcastProxy>,
     remote_broadcast_send: Arc<dyn BroadcastSendProxy>,
 
-    collective_counters: Arc<HashMap<CollectiveType, AtomicU32>>,
-    send_counters: Arc<HashMap<u32, AtomicU32>>,
-    receive_counters: Arc<HashMap<u32, AtomicU32>>,
+    collective_counters: HashMap<CollectiveType, AtomicU32>,
+    send_counters: HashMap<u32, AtomicU32>,
+    receive_counters: HashMap<u32, AtomicU32>,
 
-    message_store: Arc<MessageStoreChunked>,
+    message_buffer: MessageStoreChunked,
     enable_message_chunking: bool,
     message_chunk_size: usize,
 }
@@ -191,7 +190,7 @@ impl BurstMiddleware {
         let receive_counters: HashMap<u32, AtomicU32> =
             AtomicCounter::new((0..options.burst_size).into_iter());
 
-        let message_store = Arc::new(MessageStoreChunked::new(
+        let message_store = MessageStoreChunked::new(
             (0..options.burst_size).into_iter(),
             &[
                 CollectiveType::Direct,
@@ -200,7 +199,7 @@ impl BurstMiddleware {
                 CollectiveType::Gather,
                 CollectiveType::AllToAll,
             ],
-        ));
+        );
 
         Self {
             options,
@@ -210,17 +209,17 @@ impl BurstMiddleware {
             remote_send_receive,
             local_broadcast,
             remote_broadcast_send,
-            collective_counters: Arc::new(counters),
-            send_counters: Arc::new(send_counters),
-            receive_counters: Arc::new(receive_counters),
-            message_store,
+            collective_counters: counters,
+            send_counters: send_counters,
+            receive_counters: receive_counters,
+            message_buffer: message_store,
             enable_message_chunking: enable_message_chunking,
             message_chunk_size: message_chunk_size,
         }
     }
 
-    pub async fn send(&self, dest: u32, data: Bytes) -> Result<()> {
-        let counter = AtomicCounter::get(&*self.send_counters, &dest).unwrap();
+    pub async fn send(&mut self, dest: u32, data: Bytes) -> Result<()> {
+        let counter = AtomicCounter::get(&self.send_counters, &dest).unwrap();
         let msg = Message {
             sender_id: self.worker_id,
             chunk_id: 0,
@@ -230,21 +229,21 @@ impl BurstMiddleware {
             data,
         };
         self.send_message(dest, msg).await?;
-        AtomicCounter::inc(&*self.send_counters, &dest);
+        AtomicCounter::inc(&self.send_counters, &dest);
         Ok(())
     }
 
-    pub async fn recv(&self, from: u32) -> Result<Message> {
+    pub async fn recv(&mut self, from: u32) -> Result<Message> {
         // let counter = self.get_counter(&CollectiveType::Direct);
-        let counter = AtomicCounter::get(&*self.receive_counters, &from).unwrap();
+        let counter = AtomicCounter::get(&self.receive_counters, &from).unwrap();
         let msg = self
             .get_message(from, &CollectiveType::Direct, counter)
             .await?;
-        AtomicCounter::inc(&*self.receive_counters, &from);
+        AtomicCounter::inc(&self.receive_counters, &from);
         return Ok(msg);
     }
 
-    pub async fn broadcast(&self, data: Option<Bytes>) -> Result<Message> {
+    pub async fn broadcast(&mut self, data: Option<Bytes>) -> Result<Message> {
         let counter = self.get_counter(&CollectiveType::Broadcast);
 
         // If root worker, broadcast
@@ -295,7 +294,7 @@ impl BurstMiddleware {
         Ok(m)
     }
 
-    pub async fn gather(&self, data: Bytes) -> Result<Option<Vec<Message>>> {
+    pub async fn gather(&mut self, data: Bytes) -> Result<Option<Vec<Message>>> {
         let counter = self.get_counter(&CollectiveType::Gather);
 
         let mut result: Option<Vec<Message>> = None;
@@ -333,7 +332,7 @@ impl BurstMiddleware {
         Ok(result)
     }
 
-    pub async fn scatter(&self, data: Option<Vec<Bytes>>) -> Result<Message> {
+    pub async fn scatter(&mut self, data: Option<Vec<Bytes>>) -> Result<Message> {
         let counter = self.get_counter(&CollectiveType::Scatter);
 
         let result: Message;
@@ -383,7 +382,7 @@ impl BurstMiddleware {
         Ok(result)
     }
 
-    pub async fn all_to_all(&self, data: Vec<Bytes>) -> Result<Vec<Message>> {
+    pub async fn all_to_all(&mut self, data: Vec<Bytes>) -> Result<Vec<Message>> {
         let counter = self.get_counter(&CollectiveType::AllToAll);
 
         if data.len() != (self.options.burst_size as usize) {
@@ -510,7 +509,7 @@ impl BurstMiddleware {
     }
 
     async fn get_message(
-        &self,
+        &mut self,
         from: u32,
         collective: &CollectiveType,
         counter: u32,
@@ -527,7 +526,7 @@ impl BurstMiddleware {
         );
 
         // Check if complete message is in buffer
-        if let Some(msg) = self.message_store.get(&from, collective, &counter) {
+        if let Some(msg) = self.message_buffer.get(&from, collective, &counter) {
             return Ok(msg);
         };
 
@@ -552,10 +551,10 @@ impl BurstMiddleware {
 
         if self.enable_message_chunking {
             let missing_chunks = msg.num_chunks - 1;
-            self.message_store.insert(msg);
+            self.message_buffer.insert(msg);
 
             log::debug!(
-                "[Worker {}] Witing for {} missing chunks",
+                "[Worker {}] Waiting for {} missing chunks",
                 self.worker_id,
                 missing_chunks
             );
@@ -578,7 +577,7 @@ impl BurstMiddleware {
                             futures.push(tokio::spawn(Self::proxy_recv(id, Arc::clone(proxy))));
                         }
 
-                        self.message_store.insert(msg);
+                        self.message_buffer.insert(msg);
                     }
                     Err(e) => {
                         log::error!("Error receiving message {:?}", e);
@@ -589,7 +588,7 @@ impl BurstMiddleware {
             log::debug!("[Worker {}] received all chunks", self.worker_id);
 
             // at this point, we should have all chunks in the buffer
-            if let Some(msg) = self.message_store.get(&from, collective, &counter) {
+            if let Some(msg) = self.message_buffer.get(&from, collective, &counter) {
                 return Ok(msg);
             } else {
                 // something went wrong
@@ -611,7 +610,7 @@ impl BurstMiddleware {
                     return Ok(msg);
                 } else {
                     // If not, it into buffer and consume next message
-                    self.message_store.insert(msg);
+                    self.message_buffer.insert(msg);
                     log::debug!(
                         "[Worker {}] Put message in buffer, get next message",
                         self.worker_id
@@ -622,7 +621,7 @@ impl BurstMiddleware {
     }
 
     async fn get_messages(
-        &self,
+        &mut self,
         collective: &CollectiveType,
         counter: u32,
         sender_ids: HashSet<u32>,
@@ -632,7 +631,7 @@ impl BurstMiddleware {
         // Retrieve pending messages from buffer
         let mut sender_ids_found: HashSet<u32> = HashSet::new();
         for id in sender_ids.iter() {
-            if let Some(msg) = self.message_store.get(&id, collective, &counter) {
+            if let Some(msg) = self.message_buffer.get(&id, collective, &counter) {
                 messages.push(msg);
                 sender_ids_found.insert(*id);
             }
@@ -667,10 +666,10 @@ impl BurstMiddleware {
 
                         // Received either a partial message, or other collective message
                         // put it into buffer
-                        self.message_store.insert(msg);
+                        self.message_buffer.insert(msg);
 
                         // check if we have a complete message in the buffer
-                        if let Some(msg) = self.message_store.get(&sender_id, collective, &counter)
+                        if let Some(msg) = self.message_buffer.get(&sender_id, collective, &counter)
                         {
                             messages.push(msg);
                         } else {
@@ -694,10 +693,10 @@ impl BurstMiddleware {
     }
 
     // TODO -- this is a copy of get_message, refactor
-    async fn get_broadcast_message(&self, counter: u32) -> Result<Message> {
+    async fn get_broadcast_message(&mut self, counter: u32) -> Result<Message> {
         // Check if complete message is in buffer
         if let Some(msg) = self
-            .message_store
+            .message_buffer
             .get(&ROOT_ID, &CollectiveType::Broadcast, &counter)
         {
             return Ok(msg);
@@ -718,7 +717,7 @@ impl BurstMiddleware {
 
         if self.enable_message_chunking {
             let missing_chunks = msg.num_chunks - 1;
-            self.message_store.insert(msg);
+            self.message_buffer.insert(msg);
 
             log::debug!(
                 "[Worker {}] Broadcast -- Waiting for {} missing chunks",
@@ -750,7 +749,7 @@ impl BurstMiddleware {
                             ))));
                         }
 
-                        self.message_store.insert(msg);
+                        self.message_buffer.insert(msg);
                     }
                     Err(e) => {
                         log::error!("Error receiving message {:?}", e);
@@ -762,7 +761,7 @@ impl BurstMiddleware {
 
             // at this point, we should have all chunks in the buffer
             if let Some(msg) =
-                self.message_store
+                self.message_buffer
                     .get(&ROOT_ID, &CollectiveType::Broadcast, &counter)
             {
                 return Ok(msg);
@@ -782,7 +781,7 @@ impl BurstMiddleware {
                     return Ok(msg);
                 } else {
                     // If not, it into buffer and consume next message
-                    self.message_store.insert(msg);
+                    self.message_buffer.insert(msg);
                     log::debug!(
                         "[Worker {}] Broadcast -- Put message in buffer, get next message",
                         self.worker_id
@@ -829,10 +828,10 @@ impl BurstMiddleware {
     }
 
     fn get_counter(&self, collective: &CollectiveType) -> u32 {
-        AtomicCounter::get(&*self.collective_counters, collective).unwrap()
+        AtomicCounter::get(&self.collective_counters, collective).unwrap()
     }
 
     fn increment_counter(&self, collective: &CollectiveType) {
-        AtomicCounter::inc(&*self.collective_counters, collective);
+        AtomicCounter::inc(&self.collective_counters, collective);
     }
 }

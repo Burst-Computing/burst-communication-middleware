@@ -73,7 +73,15 @@ impl ChunkedMessageBody for VecChunkedMessageBody {
             if self.num_chunks_received == self.num_chunks {
                 log::debug!("Message is complete");
                 self.is_complete = true;
+            } else {
+                log::debug!(
+                    "Received {} of {} chunks",
+                    self.num_chunks_received,
+                    self.num_chunks
+                );
             }
+        } else {
+            log::warn!("Duplicated chunk {}", chunk_id);
         }
     }
 
