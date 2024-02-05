@@ -563,7 +563,7 @@ impl BurstMiddleware {
             self.message_buffer.insert(msg);
 
             log::debug!(
-                "[Worker {}] Witing for {} missing chunks",
+                "[Worker {}] Waiting for {} missing chunks",
                 self.worker_id,
                 missing_chunks
             );
