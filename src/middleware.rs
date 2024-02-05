@@ -98,7 +98,6 @@ impl BurstOptions {
     }
 }
 
-#[derive(Clone)]
 pub struct BurstMiddleware {
     options: Arc<BurstOptions>,
 
@@ -111,9 +110,9 @@ pub struct BurstMiddleware {
     local_broadcast: Arc<dyn BroadcastProxy>,
     remote_broadcast_send: Arc<dyn BroadcastSendProxy>,
 
-    collective_counters: Arc<HashMap<CollectiveType, AtomicU32>>,
-    send_counters: Arc<HashMap<u32, AtomicU32>>,
-    receive_counters: Arc<HashMap<u32, AtomicU32>>,
+    collective_counters: HashMap<CollectiveType, AtomicU32>,
+    send_counters: HashMap<u32, AtomicU32>,
+    receive_counters: HashMap<u32, AtomicU32>,
 
     message_buffer: MessageStoreChunked,
     enable_message_chunking: bool,
@@ -210,9 +209,9 @@ impl BurstMiddleware {
             remote_send_receive,
             local_broadcast,
             remote_broadcast_send,
-            collective_counters: Arc::new(counters),
-            send_counters: Arc::new(send_counters),
-            receive_counters: Arc::new(receive_counters),
+            collective_counters: counters,
+            send_counters: send_counters,
+            receive_counters: receive_counters,
             message_buffer: message_store,
             enable_message_chunking: enable_message_chunking,
             message_chunk_size: message_chunk_size,
@@ -220,7 +219,7 @@ impl BurstMiddleware {
     }
 
     pub async fn send(&mut self, dest: u32, data: Bytes) -> Result<()> {
-        let counter = AtomicCounter::get(&*self.send_counters, &dest).unwrap();
+        let counter = AtomicCounter::get(&self.send_counters, &dest).unwrap();
         let msg = Message {
             sender_id: self.worker_id,
             chunk_id: 0,
@@ -230,17 +229,17 @@ impl BurstMiddleware {
             data,
         };
         self.send_message(dest, msg).await?;
-        AtomicCounter::inc(&*self.send_counters, &dest);
+        AtomicCounter::inc(&self.send_counters, &dest);
         Ok(())
     }
 
     pub async fn recv(&mut self, from: u32) -> Result<Message> {
         // let counter = self.get_counter(&CollectiveType::Direct);
-        let counter = AtomicCounter::get(&*self.receive_counters, &from).unwrap();
+        let counter = AtomicCounter::get(&self.receive_counters, &from).unwrap();
         let msg = self
             .get_message(from, &CollectiveType::Direct, counter)
             .await?;
-        AtomicCounter::inc(&*self.receive_counters, &from);
+        AtomicCounter::inc(&self.receive_counters, &from);
         return Ok(msg);
     }
 
@@ -744,10 +743,10 @@ impl BurstMiddleware {
     }
 
     fn get_counter(&self, collective: &CollectiveType) -> u32 {
-        AtomicCounter::get(&*self.collective_counters, collective).unwrap()
+        AtomicCounter::get(&self.collective_counters, collective).unwrap()
     }
 
     fn increment_counter(&self, collective: &CollectiveType) {
-        AtomicCounter::inc(&*self.collective_counters, collective);
+        AtomicCounter::inc(&self.collective_counters, collective);
     }
 }

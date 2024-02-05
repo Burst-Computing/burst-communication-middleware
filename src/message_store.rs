@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-
-
 use crate::{
     chunk_store::{ChunkedMessageBody, VecChunkedMessageBody},
     types::{CollectiveType, Message},
@@ -9,7 +7,6 @@ use crate::{
 
 type WorkerCollectiveCounter = (u32, CollectiveType, u32);
 
-#[derive(Clone)]
 pub struct MessageStoreChunked {
     messages: HashMap<WorkerCollectiveCounter, VecChunkedMessageBody>,
 }

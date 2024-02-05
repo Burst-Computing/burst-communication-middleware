@@ -34,7 +34,7 @@ pub trait ChunkedMessageBody {
 }
 
 /// A [`ChunkedMessageBody`] implementation that stores the chunks in a [`Vec`].
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct VecChunkedMessageBody {
     array: Vec<Bytes>,
     num_chunks: u32,
