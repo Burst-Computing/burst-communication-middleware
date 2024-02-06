@@ -1,6 +1,5 @@
 use crate::{
-    chunk_store::chunk_message, counter::AtomicCounter, message_store::MessageStoreChunked,
-    CollectiveType, Message, Result,
+    chunk_store::chunk_message, counter::AtomicCounter, impl_chainable_setter, message_store::MessageStoreChunked, CollectiveType, Message, Result
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -11,6 +10,9 @@ use std::{
 };
 
 const ROOT_ID: u32 = 0;
+
+const MB: usize = 1024 * 1024;
+const DEFAULT_MESSAGE_CHUNK_SIZE: usize = 1 * MB;
 
 pub trait SendReceiveProxy: SendProxy + ReceiveProxy + Send + Sync {}
 
@@ -80,21 +82,29 @@ pub struct BurstInfo {
 
 impl BurstOptions {
     pub fn new(
-        burst_id: String,
         burst_size: u32,
         group_ranges: HashMap<String, HashSet<u32>>,
         group_id: String,
-        enable_message_chunking: bool,
-        message_chunk_size: usize,
     ) -> Self {
         Self {
-            burst_id,
+            burst_id: "default".to_string(),
             burst_size,
             group_ranges,
             group_id,
-            enable_message_chunking,
-            message_chunk_size,
+            enable_message_chunking: false,
+            message_chunk_size: DEFAULT_MESSAGE_CHUNK_SIZE,
         }
+    }
+
+    impl_chainable_setter!(burst_id, String);
+    impl_chainable_setter!(burst_size, u32);
+    impl_chainable_setter!(group_ranges, HashMap<String, HashSet<u32>>);
+    impl_chainable_setter!(group_id, String);
+    impl_chainable_setter!(enable_message_chunking, bool);
+    impl_chainable_setter!(message_chunk_size, usize);
+
+    pub fn build(&self) -> Self {
+        self.clone()
     }
 }
 
