@@ -1,12 +1,15 @@
 use crate::{
-    chunk_store::chunk_message, counter::AtomicCounter, impl_chainable_setter, message_store::MessageStoreChunked, CollectiveType, Message, Result
+    chunk_store::chunk_message, impl_chainable_setter, message_store::MessageStoreChunked,
+    CollectiveType, Message, Result,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream::FuturesUnordered, StreamExt};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{atomic::AtomicU32, Arc},
+    fmt::Debug,
+    hash::Hash,
+    sync::Arc,
 };
 
 const ROOT_ID: u32 = 0;
@@ -120,9 +123,9 @@ pub struct BurstMiddleware {
     local_broadcast: Arc<dyn BroadcastProxy>,
     remote_broadcast_send: Arc<dyn BroadcastSendProxy>,
 
-    collective_counters: HashMap<CollectiveType, AtomicU32>,
-    send_counters: HashMap<u32, AtomicU32>,
-    receive_counters: HashMap<u32, AtomicU32>,
+    collective_counters: HashMap<CollectiveType, u32>,
+    send_counters: HashMap<u32, u32>,
+    receive_counters: HashMap<u32, u32>,
 
     message_buffer: MessageStoreChunked,
     enable_message_chunking: bool,
@@ -186,19 +189,21 @@ impl BurstMiddleware {
         let message_chunk_size = options.message_chunk_size;
 
         // create counters
-        let counters = AtomicCounter::new(
-            [
-                CollectiveType::Broadcast,
-                CollectiveType::Gather,
-                CollectiveType::Scatter,
-                CollectiveType::AllToAll,
-            ]
-            .into_iter(),
-        );
-        let send_counters: HashMap<u32, AtomicU32> =
-            AtomicCounter::new((0..options.burst_size).into_iter());
-        let receive_counters: HashMap<u32, AtomicU32> =
-            AtomicCounter::new((0..options.burst_size).into_iter());
+        let counters = [
+            CollectiveType::Broadcast,
+            CollectiveType::Gather,
+            CollectiveType::Scatter,
+            CollectiveType::AllToAll,
+        ]
+        .into_iter()
+        .map(|c| (c, 0))
+        .collect();
+
+        let send_counters: HashMap<u32, u32> = (0..options.burst_size)
+            .into_iter()
+            .map(|id| (id, 0))
+            .collect();
+        let receive_counters = send_counters.clone();
 
         let message_store = MessageStoreChunked::new(
             (0..options.burst_size).into_iter(),
@@ -220,16 +225,16 @@ impl BurstMiddleware {
             local_broadcast,
             remote_broadcast_send,
             collective_counters: counters,
-            send_counters: send_counters,
-            receive_counters: receive_counters,
+            send_counters,
+            receive_counters,
             message_buffer: message_store,
-            enable_message_chunking: enable_message_chunking,
-            message_chunk_size: message_chunk_size,
+            enable_message_chunking,
+            message_chunk_size,
         }
     }
 
     pub async fn send(&mut self, dest: u32, data: Bytes) -> Result<()> {
-        let counter = AtomicCounter::get(&self.send_counters, &dest).unwrap();
+        let counter = Self::get_counter(&self.send_counters, &dest)?;
         let msg = Message {
             sender_id: self.worker_id,
             chunk_id: 0,
@@ -239,22 +244,22 @@ impl BurstMiddleware {
             data,
         };
         self.send_message(dest, msg).await?;
-        AtomicCounter::inc(&self.send_counters, &dest);
+        Self::increment_counter(&mut self.send_counters, &dest)?;
         Ok(())
     }
 
     pub async fn recv(&mut self, from: u32) -> Result<Message> {
         // let counter = self.get_counter(&CollectiveType::Direct);
-        let counter = AtomicCounter::get(&self.receive_counters, &from).unwrap();
+        let counter = Self::get_counter(&self.receive_counters, &from)?;
         let msg = self
             .get_message(from, &CollectiveType::Direct, counter)
             .await?;
-        AtomicCounter::inc(&self.receive_counters, &from);
+        Self::increment_counter(&mut self.receive_counters, &from)?;
         return Ok(msg);
     }
 
     pub async fn broadcast(&mut self, data: Option<Bytes>) -> Result<Message> {
-        let counter = self.get_counter(&CollectiveType::Broadcast);
+        let counter = Self::get_counter(&self.collective_counters, &CollectiveType::Broadcast)?;
 
         // If root worker, broadcast
         if self.worker_id == ROOT_ID {
@@ -299,13 +304,13 @@ impl BurstMiddleware {
         let m = self.get_broadcast_message(counter).await?;
 
         // Increment broadcast counter
-        self.increment_counter(&CollectiveType::Broadcast);
+        Self::increment_counter(&mut self.collective_counters, &CollectiveType::Broadcast)?;
 
         Ok(m)
     }
 
     pub async fn gather(&mut self, data: Bytes) -> Result<Option<Vec<Message>>> {
-        let counter = self.get_counter(&CollectiveType::Gather);
+        let counter = Self::get_counter(&self.collective_counters, &CollectiveType::Gather)?;
 
         let mut result: Option<Vec<Message>> = None;
         let msg = Message {
@@ -338,12 +343,12 @@ impl BurstMiddleware {
             self.send_message(ROOT_ID, msg).await?;
         }
 
-        self.increment_counter(&CollectiveType::Gather);
+        Self::increment_counter(&mut self.collective_counters, &CollectiveType::Gather)?;
         Ok(result)
     }
 
     pub async fn scatter(&mut self, data: Option<Vec<Bytes>>) -> Result<Message> {
-        let counter = self.get_counter(&CollectiveType::Scatter);
+        let counter = Self::get_counter(&self.collective_counters, &CollectiveType::Scatter)?;
 
         let result: Message;
 
@@ -388,12 +393,12 @@ impl BurstMiddleware {
         }
 
         // Increment scatter counter
-        self.increment_counter(&CollectiveType::Scatter);
+        Self::increment_counter(&mut self.collective_counters, &CollectiveType::Scatter)?;
         Ok(result)
     }
 
     pub async fn all_to_all(&mut self, data: Vec<Bytes>) -> Result<Vec<Message>> {
-        let counter = self.get_counter(&CollectiveType::AllToAll);
+        let counter = Self::get_counter(&self.collective_counters, &CollectiveType::AllToAll)?;
 
         if data.len() != (self.options.burst_size as usize) {
             return Err("Data size must be equal to burst size".into());
@@ -432,7 +437,7 @@ impl BurstMiddleware {
         received_messages.sort_by_key(|msg| msg.sender_id);
 
         // Increment all_to_all counter
-        self.increment_counter(&CollectiveType::AllToAll);
+        Self::increment_counter(&mut self.collective_counters, &CollectiveType::AllToAll)?;
         Ok(received_messages)
     }
 
@@ -837,11 +842,23 @@ impl BurstMiddleware {
         proxy.broadcast_recv().await
     }
 
-    fn get_counter(&self, collective: &CollectiveType) -> u32 {
-        AtomicCounter::get(&self.collective_counters, collective).unwrap()
+    fn get_counter<T>(map: &HashMap<T, u32>, key: &T) -> Result<u32>
+    where
+        T: Eq + PartialEq + Hash + Debug,
+    {
+        map.get(key)
+            .map(|c| *c)
+            .ok_or(format!("Counter not found for key {:?}", key).into())
     }
 
-    fn increment_counter(&self, collective: &CollectiveType) {
-        AtomicCounter::inc(&self.collective_counters, collective);
+    fn increment_counter<T>(map: &mut HashMap<T, u32>, key: &T) -> Result<()>
+    where
+        T: Eq + PartialEq + Hash + Debug,
+    {
+        let v = map
+            .get_mut(key)
+            .ok_or(format!("Counter not found for key {:?}", key))?;
+        *v += 1;
+        Ok(())
     }
 }
