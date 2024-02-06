@@ -27,9 +27,7 @@ impl TokioChannelOptions {
         }
     }
 
-    impl_chainable_setter! {
-        broadcast_channel_size, usize
-    }
+    impl_chainable_setter!(broadcast_channel_size, usize);
 
     pub fn build(&self) -> Self {
         self.clone()

@@ -29,17 +29,9 @@ impl RedisStreamOptions {
         }
     }
 
-    impl_chainable_setter! {
-        redis_uri, String
-    }
-
-    impl_chainable_setter! {
-        direct_stream_prefix, String
-    }
-
-    impl_chainable_setter! {
-        broadcast_stream_prefix, String
-    }
+    impl_chainable_setter!(redis_uri, String);
+    impl_chainable_setter!(direct_stream_prefix, String);
+    impl_chainable_setter!(broadcast_stream_prefix, String);
 
     pub fn build(&self) -> Self {
         self.clone()
