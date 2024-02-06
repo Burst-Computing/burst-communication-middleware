@@ -1,7 +1,6 @@
 mod actor;
 mod burst_message_relay;
 mod chunk_store;
-mod counter;
 mod message_store;
 mod middleware;
 mod rabbitmq;
