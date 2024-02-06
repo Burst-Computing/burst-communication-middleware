@@ -27,14 +27,11 @@ fn main() {
         _,
         _,
     >(
-        BurstOptions::new(
-            "hello_world".to_string(),
-            2,
-            group_ranges,
-            0.to_string(),
-            true,
-            4 * 1024 * 1024,
-        ),
+        BurstOptions::new(2, group_ranges, 0.to_string())
+            .burst_id("hello_world".to_string())
+            .enable_message_chunking(true)
+            .message_chunk_size(4 * 1024 * 1024)
+            .build(),
         TokioChannelOptions::new()
             .broadcast_channel_size(256)
             .build(),
