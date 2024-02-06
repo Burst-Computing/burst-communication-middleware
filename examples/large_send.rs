@@ -26,14 +26,11 @@ fn handle_group(
         _,
         _,
     >(
-        BurstOptions::new(
-            "large_send".to_string(),
-            2,
-            group,
-            group_id,
-            true,
-            4 * 1024 * 1024,
-        ),
+        BurstOptions::new(2, group, group_id)
+            .burst_id("large_send".to_string())
+            .enable_message_chunking(true)
+            .message_chunk_size(4 * 1024 * 1024)
+            .build(),
         TokioChannelOptions::new()
             .broadcast_channel_size(256)
             .build(),

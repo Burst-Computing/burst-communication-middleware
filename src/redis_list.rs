@@ -29,17 +29,9 @@ impl RedisListOptions {
         }
     }
 
-    impl_chainable_setter! {
-        redis_uri, String
-    }
-
-    impl_chainable_setter! {
-        list_key_prefix, String
-    }
-
-    impl_chainable_setter! {
-        broadcast_topic_prefix, String
-    }
+    impl_chainable_setter!(redis_uri, String);
+    impl_chainable_setter!(list_key_prefix, String);
+    impl_chainable_setter!(broadcast_topic_prefix, String);
 
     pub fn build(&self) -> Self {
         self.clone()

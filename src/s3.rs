@@ -40,41 +40,15 @@ impl S3Options {
         }
     }
 
-    impl_chainable_setter! {
-        access_key_id, String
-    }
-
-    impl_chainable_setter! {
-        secret_access_key, String
-    }
-
-    impl_chainable_setter! {
-        session_token, Option<String>
-    }
-
-    impl_chainable_setter! {
-        region, String
-    }
-
-    impl_chainable_setter! {
-        endpoint, Option<String>
-    }
-
-    impl_chainable_setter! {
-        bucket, String
-    }
-
-    impl_chainable_setter! {
-        prefix, String
-    }
-
-    impl_chainable_setter! {
-        wait_time, f64
-    }
-
-    impl_chainable_setter! {
-        enable_broadcast, bool
-    }
+    impl_chainable_setter!(access_key_id, String);
+    impl_chainable_setter!(secret_access_key, String);
+    impl_chainable_setter!(session_token, Option<String>);
+    impl_chainable_setter!(region, String);
+    impl_chainable_setter!(endpoint, Option<String>);
+    impl_chainable_setter!(bucket, String);
+    impl_chainable_setter!(prefix, String);
+    impl_chainable_setter!(wait_time, f64);
+    impl_chainable_setter!(enable_broadcast, bool);
 
     pub fn build(&self) -> Self {
         self.clone()
