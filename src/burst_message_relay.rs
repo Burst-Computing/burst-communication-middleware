@@ -2,9 +2,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 
-use burst_message_relay::{client::client::Client, config::ClientConfig};
-
-use tokio::sync::Mutex;
+use burst_message_relay::{
+    client::client::Client, client::connection_pool::ConnectionPool, config::ClientConfig,
+};
 
 use crate::{
     impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
@@ -25,8 +25,13 @@ impl BurstMessageRelayOptions {
         }
     }
 
-    impl_chainable_setter!(server_uri, String);
-    impl_chainable_setter!(config, ClientConfig);
+    impl_chainable_setter! {
+        server_uri, String
+    }
+
+    impl_chainable_setter! {
+        config, ClientConfig
+    }
 
     pub fn build(&self) -> Self {
         self.clone()
@@ -54,9 +59,20 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
         HashMap<u32, Box<dyn SendReceiveProxy>>,
         Box<dyn BroadcastSendProxy>,
     )> {
+        let current_group = burst_options
+            .group_ranges
+            .get(&burst_options.group_id)
+            .unwrap();
+
         let server_options = Arc::new(server_options);
-        let mut client = Client::new(&server_options.server_uri, ClientConfig::default());
-        client.connect().await;
+
+        let connection_pool = Arc::new(ConnectionPool::new(
+            &server_options.server_uri,
+            current_group.len() as u32 + 1,
+        ));
+        connection_pool.initialize_conns().await;
+
+        let mut client = Client::new(connection_pool.clone(), ClientConfig::default());
 
         client
             .init_queues(
@@ -70,16 +86,12 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
             client.create_bc_group(group_id.to_string(), 1).await;
         }
 
-        let current_group = burst_options
-            .group_ranges
-            .get(&burst_options.group_id)
-            .unwrap();
-
         let mut hmap = HashMap::new();
 
         futures::future::try_join_all(current_group.iter().map(|worker_id| {
             let o = server_options.clone();
-            async move { StreamServerProxy::new(o, *worker_id).await }
+            let conn_pool_clone = connection_pool.clone();
+            async move { StreamServerProxy::new(o, conn_pool_clone.clone(), *worker_id).await }
         }))
         .await?
         .into_iter()
@@ -90,21 +102,62 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
             );
         });
 
+        let broadcast_proxy_arc = Arc::new(broadcast_proxy);
+
         //spawn task to receive broadcast messages and send them to the broadcast proxy
+        let conn_pool = connection_pool.clone();
         tokio::spawn({
             let b = burst_options.clone();
             async move {
+                let connection_pool = conn_pool.clone();
+                let bc_proxy_arc = broadcast_proxy_arc.clone();
+
                 loop {
-                    let data = client.broadcast(b.group_id.to_string()).await;
+                    let conn_pool = connection_pool.clone();
+
+                    let mut client = Client::new(conn_pool.clone(), ClientConfig::default());
+
+                    let data = client.broadcast(&b.group_id).await;
                     let msg = Message::from(data);
-                    broadcast_proxy.broadcast_send(msg).await.unwrap();
+
+                    if msg.num_chunks == 1 {
+                        bc_proxy_arc.clone().broadcast_send(msg).await.unwrap();
+                    } else {
+                        let group_id = b.group_id.clone();
+                        let missing_chunks = msg.num_chunks - 1;
+                        broadcast_proxy_arc.broadcast_send(msg).await.unwrap();
+
+                        let mut tasks = Vec::new();
+                        for _ in 0..missing_chunks {
+                            let connection_pool = conn_pool.clone();
+                            let broadcast_proxy_arc = bc_proxy_arc.clone();
+                            let gp_id = group_id.clone();
+                            let task = tokio::spawn(async move {
+                                let mut client =
+                                    Client::new(connection_pool.clone(), ClientConfig::default());
+                                let data = client.broadcast(&gp_id).await;
+                                let msg = Message::from(data);
+                                broadcast_proxy_arc.broadcast_send(msg).await.unwrap();
+                            });
+                            tasks.push(task);
+                        }
+
+                        futures::future::join_all(tasks).await;
+                    }
                 }
             }
         });
 
         Ok((
             hmap,
-            Box::new(StreamServerBroadcastProxy::new(server_options, burst_options).await?),
+            Box::new(
+                StreamServerBroadcastProxy::new(
+                    server_options,
+                    connection_pool.clone(),
+                    burst_options,
+                )
+                .await?,
+            ),
         ))
     }
 }
@@ -116,16 +169,19 @@ pub struct StreamServerProxy {
 }
 
 pub struct StreamServerSendProxy {
-    client: Mutex<Client>,
+    connection_pool: Arc<ConnectionPool>,
+    client_config: ClientConfig,
 }
 
 pub struct StreamServerReceiveProxy {
-    client: Mutex<Client>,
     worker_id: u32,
+    connection_pool: Arc<ConnectionPool>,
+    client_config: ClientConfig,
 }
 
 pub struct StreamServerBroadcastProxy {
-    client: Mutex<Client>,
+    client_config: ClientConfig,
+    connection_pool: Arc<ConnectionPool>,
     burst_options: Arc<BurstOptions>,
 }
 
@@ -148,13 +204,21 @@ impl ReceiveProxy for StreamServerProxy {
 impl StreamServerProxy {
     pub async fn new(
         server_options: Arc<BurstMessageRelayOptions>,
+        connection_pool: Arc<ConnectionPool>,
         worker_id: u32,
     ) -> Result<Self> {
         Ok(Self {
             worker_id,
-            sender: Box::new(StreamServerSendProxy::new(server_options.clone()).await?),
+            sender: Box::new(
+                StreamServerSendProxy::new(server_options.clone(), connection_pool.clone()).await?,
+            ),
             receiver: Box::new(
-                StreamServerReceiveProxy::new(server_options.clone(), worker_id).await?,
+                StreamServerReceiveProxy::new(
+                    server_options.clone(),
+                    connection_pool.clone(),
+                    worker_id,
+                )
+                .await?,
             ),
         })
     }
@@ -166,19 +230,24 @@ impl SendProxy for StreamServerSendProxy {
         if msg.collective == CollectiveType::Broadcast {
             Err("Cannot send broadcast message to a single destination".into())
         } else {
-            let data: [&[u8]; 2] = (&msg).into();
-            self.client.lock().await.send_refs(dest, &data).await;
+            let data: &[&[u8]; 2] = &(&msg).into();
+            let mut client = Client::new(self.connection_pool.clone(), self.client_config);
+            client.send_refs(dest, data).await;
+
             Ok(())
         }
     }
 }
 
 impl StreamServerSendProxy {
-    pub async fn new(server_options: Arc<BurstMessageRelayOptions>) -> Result<Self> {
-        let mut client = Client::new(&server_options.server_uri, server_options.config.clone());
-        client.connect().await;
+    pub async fn new(
+        server_options: Arc<BurstMessageRelayOptions>,
+        connection_pool: Arc<ConnectionPool>,
+    ) -> Result<Self> {
+        let client_config = server_options.config;
         Ok(Self {
-            client: Mutex::new(client),
+            connection_pool,
+            client_config,
         })
     }
 }
@@ -186,8 +255,11 @@ impl StreamServerSendProxy {
 #[async_trait]
 impl ReceiveProxy for StreamServerReceiveProxy {
     async fn recv(&self) -> Result<Message> {
-        let data = self.client.lock().await.recv(self.worker_id).await;
+        let mut client = Client::new(self.connection_pool.clone(), self.client_config);
+        let data = client.recv(self.worker_id).await;
+
         let msg = Message::from(data);
+
         Ok(msg)
     }
 }
@@ -195,13 +267,14 @@ impl ReceiveProxy for StreamServerReceiveProxy {
 impl StreamServerReceiveProxy {
     pub async fn new(
         server_options: Arc<BurstMessageRelayOptions>,
+        connection_pool: Arc<ConnectionPool>,
         worker_id: u32,
     ) -> Result<Self> {
-        let mut client = Client::new(&server_options.server_uri, server_options.config.clone());
-        client.connect().await;
+        let client_config = server_options.config;
         Ok(Self {
-            client: Mutex::new(client),
             worker_id,
+            connection_pool,
+            client_config,
         })
     }
 }
@@ -213,14 +286,14 @@ impl BroadcastSendProxy for StreamServerBroadcastProxy {
             Err("Cannot send non-broadcast message to broadcast".into())
         } else {
             let data: [&[u8]; 2] = (&msg).into();
-            let mut client = self.client.lock().await;
+            let mut client = Client::new(self.connection_pool.clone(), self.client_config);
             for dest in self
                 .burst_options
                 .group_ranges
                 .keys()
                 .filter(|dest| **dest != self.burst_options.group_id)
             {
-                client.broadcast_root_refs(dest.to_string(), &data).await;
+                client.broadcast_root_refs(dest, &data).await;
             }
             Ok(())
         }
@@ -230,12 +303,13 @@ impl BroadcastSendProxy for StreamServerBroadcastProxy {
 impl StreamServerBroadcastProxy {
     pub async fn new(
         server_options: Arc<BurstMessageRelayOptions>,
+        connection_pool: Arc<ConnectionPool>,
         burst_options: Arc<BurstOptions>,
     ) -> Result<Self> {
-        let mut client = Client::new(&server_options.server_uri, server_options.config.clone());
-        client.connect().await;
+        let client_config = server_options.config;
         Ok(Self {
-            client: Mutex::new(client),
+            client_config,
+            connection_pool,
             burst_options,
         })
     }
