@@ -179,7 +179,7 @@ impl SendReceiveFactory<S3Options> for S3Impl {
                             .await
                             .unwrap();
 
-                        let (sender_id, counter) = match obj.metadata() {
+                        let (sender_id, counter, chunk_id, num_chunks) = match obj.metadata() {
                             Some(metadata) => {
                                 let sender_id = match metadata.get("sender_id") {
                                     Some(sender_id) => match sender_id.parse::<u32>() {
@@ -213,7 +213,39 @@ impl SendReceiveFactory<S3Options> for S3Impl {
                                         continue;
                                     }
                                 };
-                                (sender_id, counter)
+                                let chunk_id = match metadata.get("chunk_id") {
+                                    Some(chunk_id) => match chunk_id.parse::<u32>() {
+                                        Ok(chunk_id) => chunk_id,
+                                        Err(err) => {
+                                            log::error!("Failed to parse chunk_id: {}", err);
+                                            continue;
+                                        }
+                                    },
+                                    None => {
+                                        log::error!(
+                                            "No chunk_id found in metadata for key: {}",
+                                            new_key
+                                        );
+                                        continue;
+                                    }
+                                };
+                                let num_chunks = match metadata.get("num_chunks") {
+                                    Some(num_chunks) => match num_chunks.parse::<u32>() {
+                                        Ok(num_chunks) => num_chunks,
+                                        Err(err) => {
+                                            log::error!("Failed to parse num_chunks: {}", err);
+                                            continue;
+                                        }
+                                    },
+                                    None => {
+                                        log::error!(
+                                            "No num_chunks found in metadata for key: {}",
+                                            new_key
+                                        );
+                                        continue;
+                                    }
+                                };
+                                (sender_id, counter, chunk_id, num_chunks)
                             }
                             None => {
                                 log::error!("No metadata found");
@@ -230,10 +262,10 @@ impl SendReceiveFactory<S3Options> for S3Impl {
                         );
 
                         let msg = Message {
-                            sender_id: sender_id,
-                            chunk_id: 0,
-                            num_chunks: 1,
-                            counter: counter,
+                            sender_id,
+                            chunk_id,
+                            num_chunks,
+                            counter,
                             collective: CollectiveType::Broadcast,
                             data: Bytes::from(bytes),
                         };
@@ -356,6 +388,8 @@ impl SendProxy for S3SendProxy {
             .metadata("sender_id", self.worker_id.to_string())
             .metadata("collective", msg.collective.to_string())
             .metadata("counter", msg.counter.to_string())
+            .metadata("chunk_id", msg.chunk_id.to_string())
+            .metadata("num_chunks", msg.num_chunks.to_string())
             .send()
             .await?;
         Ok(())
@@ -394,7 +428,7 @@ impl ReceiveProxy for S3ReceiveProxy {
                 .send()
                 .await?;
 
-            let (sender_id, collective_type, counter) = match obj.metadata() {
+            let (sender_id, collective_type, counter, chunk_id, num_chunks) = match obj.metadata() {
                 Some(metadata) => {
                     let sender_id = match metadata.get("sender_id") {
                         Some(sender_id) => match sender_id.parse::<u32>() {
@@ -439,7 +473,33 @@ impl ReceiveProxy for S3ReceiveProxy {
                             continue;
                         }
                     };
-                    (sender_id, collective_type, counter)
+                    let chunk_id = match metadata.get("chunk_id") {
+                        Some(chunk_id) => match chunk_id.parse::<u32>() {
+                            Ok(chunk_id) => chunk_id,
+                            Err(err) => {
+                                log::error!("Failed to parse chunk_id: {}", err);
+                                continue;
+                            }
+                        },
+                        None => {
+                            log::error!("No chunk_id found in metadata for key: {}", key);
+                            continue;
+                        }
+                    };
+                    let num_chunks = match metadata.get("num_chunks") {
+                        Some(num_chunks) => match num_chunks.parse::<u32>() {
+                            Ok(num_chunks) => num_chunks,
+                            Err(err) => {
+                                log::error!("Failed to parse num_chunks: {}", err);
+                                continue;
+                            }
+                        },
+                        None => {
+                            log::error!("No num_chunks found in metadata for key: {}", key);
+                            continue;
+                        }
+                    };
+                    (sender_id, collective_type, counter, chunk_id, num_chunks)
                 }
                 None => {
                     log::error!("No metadata found");
@@ -458,10 +518,10 @@ impl ReceiveProxy for S3ReceiveProxy {
                 .await?;
 
             let msg = Message {
-                sender_id: sender_id,
-                chunk_id: 0,
-                num_chunks: 1,
-                counter: counter,
+                sender_id,
+                chunk_id,
+                num_chunks,
+                counter,
                 collective: collective_type,
                 data: Bytes::from(bytes),
             };
@@ -504,6 +564,8 @@ impl BroadcastSendProxy for S3BroadcastSendProxy {
             .metadata("sender_id", msg.sender_id.to_string())
             .metadata("collective", msg.collective.to_string())
             .metadata("counter", msg.counter.to_string())
+            .metadata("chunk_id", msg.chunk_id.to_string())
+            .metadata("num_chunks", msg.num_chunks.to_string())
             .send()
             .await?;
         Ok(())
