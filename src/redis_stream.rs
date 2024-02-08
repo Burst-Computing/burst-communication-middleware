@@ -2,13 +2,12 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use deadpool_redis::{Config, Pool, Runtime};
-use futures::lock::Mutex;
 use redis::{
     aio::{ConnectionLike, MultiplexedConnection},
     streams::{StreamReadOptions, StreamReadReply},
     AsyncCommands, Client,
 };
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
 use crate::{
     impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
