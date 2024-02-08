@@ -674,36 +674,31 @@ impl BurstMiddleware {
             match fut {
                 Ok((id, fut_res)) => {
                     let msg = fut_res?;
-                    // Check if this is a message we are waiting for
-                    if msg.counter == counter
+                    if msg.num_chunks == 1
+                        && msg.counter == counter
                         && msg.collective == *collective
-                        && sender_ids.contains(&msg.sender_id)
                     {
-                        if msg.num_chunks == 1 {
-                            // Got a complete message, add it to the return list
+                        messages.push(msg);
+                    } else {
+                        let sender_id = msg.sender_id;
+
+                        // Received either a partial message, or other collective message
+                        // put it into buffer
+                        self.message_buffer.insert(msg);
+
+                        // check if we have a complete message in the buffer
+                        if let Some(msg) = self.message_buffer.get(&sender_id, collective, &counter)
+                        {
                             messages.push(msg);
                         } else {
-                            // Got a chunked message, we need to receive all chunks
-                            let proxy = if self.group.contains(&msg.sender_id) {
+                            // if not, spawn a new task to receive another message
+                            let proxy = if self.group.contains(&id) {
                                 Arc::clone(&self.local_send_receive)
                             } else {
                                 Arc::clone(&self.remote_send_receive)
                             };
-                            let complete_msg =
-                                self.get_complete_message(msg, Arc::clone(&proxy)).await?;
-                            messages.push(complete_msg);
+                            futures.push(tokio::spawn(Self::proxy_recv(id, proxy)));
                         }
-                    } else {
-                        // Received other collective message, put it into buffer
-                        self.message_buffer.insert(msg);
-
-                        // Spawn a new task to receive another message
-                        let proxy = if self.group.contains(&id) {
-                            Arc::clone(&self.local_send_receive)
-                        } else {
-                            Arc::clone(&self.remote_send_receive)
-                        };
-                        futures.push(tokio::spawn(Self::proxy_recv(id, proxy)));
                     }
                 }
                 Err(e) => {
