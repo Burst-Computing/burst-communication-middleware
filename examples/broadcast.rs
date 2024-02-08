@@ -38,14 +38,12 @@ fn main() {
 
     let mut threads = Vec::with_capacity(BURST_SIZE as usize);
     for group_id in 0..GROUPS {
-        let burst_options = BurstOptions::new(
-            "broadcast".to_string(),
-            BURST_SIZE,
-            group_ranges.clone(),
-            group_id.to_string(),
-            true,
-            4 * 1024 * 1024,
-        );
+        let burst_options =
+            BurstOptions::new(BURST_SIZE, group_ranges.clone(), group_id.to_string())
+                .burst_id("broadcast".to_string())
+                .enable_message_chunking(true)
+                .message_chunk_size(4 * 1024 * 1024)
+                .build();
 
         let channel_options = TokioChannelOptions::new()
             .broadcast_channel_size(256)

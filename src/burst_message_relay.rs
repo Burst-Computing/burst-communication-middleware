@@ -25,13 +25,8 @@ impl BurstMessageRelayOptions {
         }
     }
 
-    impl_chainable_setter! {
-        server_uri, String
-    }
-
-    impl_chainable_setter! {
-        config, ClientConfig
-    }
+    impl_chainable_setter!(server_uri, String);
+    impl_chainable_setter!(config, ClientConfig);
 
     pub fn build(&self) -> Self {
         self.clone()
