@@ -254,7 +254,7 @@ impl ReceiveProxy for RedisStreamReceiveProxy {
         drop(last_id);
 
         let msg = deserialize_stream_reply(reply)?;
-        log::debug!("[Redis Stream] Got message {:?}", msg);
+        // log::debug!("[Redis Stream] Got message {:?}", msg);
         Ok(msg)
     }
 }
@@ -381,11 +381,11 @@ async fn read_stream<C>(
 where
     C: ConnectionLike + Send,
 {
-    log::debug!(
-        "[Redis Stream] Reading from stream {} with last_id {}",
-        stream,
-        last_id
-    );
+    // log::debug!(
+    //     "[Redis Stream] Reading from stream {} with last_id {}",
+    //     stream,
+    //     last_id
+    // );
     let reply: StreamReadReply = connection
         .xread_options(
             &[stream],
@@ -397,11 +397,11 @@ where
     let stream_key = reply.keys.iter().next().unwrap();
     let last_id = stream_key.ids.iter().next().unwrap().id.clone();
 
-    log::debug!(
-        "[Redis Stream] Got last_id {} from stream {}",
-        last_id,
-        stream
-    );
+    // log::debug!(
+    //     "[Redis Stream] Got last_id {} from stream {}",
+    //     last_id,
+    //     stream
+    // );
 
     return Ok((last_id, reply));
 }
