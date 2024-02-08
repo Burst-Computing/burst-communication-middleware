@@ -18,8 +18,8 @@ env_logger = "0.9.3"
 uuid = { version = "1.5.0", features = ["v4"] }
 redis = { version = "0.24", features = ["tokio-comp"] }
 deadpool-redis = "0.14.0"
-aws-sdk-s3 = "1.14.0"
-aws-config = "1.1.4"
+aws-sdk-s3 = { verison = "1.14.0", features = ["behavior-version-latest"] }
+aws-config = { version = "1.1.4", features = ["behavior-version-latest"] }
 aws-credential-types = { version = "1.0.0", features = [
     "hardcoded-credentials",
 ] }
