@@ -540,98 +540,101 @@ impl BurstMiddleware {
             counter
         );
 
-        // Check if complete message is in buffer
-        if let Some(msg) = self.message_buffer.get(&from, collective, &counter) {
-            return Ok(msg);
-        };
-
-        // Block and receive next message
-        let proxy = if self.group.contains(&from) {
-            &self.local_send_receive
-        } else {
-            &self.remote_send_receive
-        };
-        let msg = proxy.recv().await?;
-
-        log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
-
-        // Check if this is the message we are waiting for
-        if msg.num_chunks == 1
-            && msg.counter == counter
-            && msg.collective == *collective
-            && msg.sender_id == from
-        {
-            return Ok(msg);
-        }
-
-        if self.enable_message_chunking {
-            let missing_chunks = msg.num_chunks - 1;
-            self.message_buffer.insert(msg);
-
-            log::debug!(
-                "[Worker {}] Waiting for {} missing chunks",
-                self.worker_id,
-                missing_chunks
-            );
-
-            // we will expect, at least, N - 1 more messages, where N is the number of chunks
-            let mut futures = (0..missing_chunks)
-                .map(|_| Self::proxy_recv(from, Arc::clone(proxy)))
-                .map(tokio::spawn)
-                .collect::<FuturesUnordered<_>>();
-
-            // Loop until all chunks are received
-            while let Some(fut) = futures.next().await {
-                match fut {
-                    Ok((id, fut_res)) => {
-                        let msg = fut_res?;
-                        log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
-
-                        if msg.counter != counter || msg.collective != *collective {
-                            // we got a message with another collective or counter, we will need to receive yet another message
-                            futures.push(tokio::spawn(Self::proxy_recv(id, Arc::clone(proxy))));
-                        }
-
-                        self.message_buffer.insert(msg);
-                    }
-                    Err(e) => {
-                        log::error!("Error receiving message {:?}", e);
-                    }
-                }
-            }
-
-            log::debug!("[Worker {}] received all chunks", self.worker_id);
-
-            // at this point, we should have all chunks in the buffer
+        loop {
+            // Check if complete message is in buffer
             if let Some(msg) = self.message_buffer.get(&from, collective, &counter) {
                 return Ok(msg);
-            } else {
-                // something went wrong
-                // TODO try receiving more messages?
-                return Err("Waited for all chunks but some are missing".into());
-            }
-        } else {
-            // got a message with another collective or counter, loop until we receive what we want
-            loop {
-                let msg = proxy.recv().await?;
-                log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
+            };
 
-                // Check if this is the message we are waiting for
-                if msg.num_chunks == 1
-                    && msg.counter == counter
-                    && msg.collective == *collective
-                    && msg.sender_id == from
-                {
+            // Block and receive next message
+            let proxy = if self.group.contains(&from) {
+                &self.local_send_receive
+            } else {
+                &self.remote_send_receive
+            };
+            let msg = proxy.recv().await?;
+
+            log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
+
+            // Check if this is the message we are waiting for
+            if msg.counter == counter && msg.collective == *collective && msg.sender_id == from {
+                if msg.num_chunks == 1 {
                     return Ok(msg);
                 } else {
-                    // If not, it into buffer and consume next message
+                    // If message is chunked, we need to receive all chunks
+                    let complete_msg = self.get_complete_message(msg, Arc::clone(proxy)).await?;
+                    return Ok(complete_msg);
+                }
+            } else {
+                // got a message with another collective or counter, loop until we receive what we want
+                self.message_buffer.insert(msg);
+                log::debug!(
+                    "[Worker {}] Put message in buffer, get next message",
+                    self.worker_id
+                )
+            }
+        }
+    }
+
+    async fn get_complete_message(
+        &mut self,
+        msg_chunk: Message,
+        proxy: Arc<dyn SendReceiveProxy>,
+    ) -> Result<Message> {
+        if !self.enable_message_chunking || (msg_chunk.num_chunks - 1) < 2 {
+            panic!("get_complete_message called with non-chunked message")
+        }
+
+        let missing_chunks = msg_chunk.num_chunks - 1;
+        let from = msg_chunk.sender_id;
+        let collective = msg_chunk.collective;
+        let counter = msg_chunk.counter;
+        log::debug!(
+            "[Worker {}] Waiting for {} missing chunks for message {:?}",
+            self.worker_id,
+            missing_chunks,
+            msg_chunk
+        );
+
+        // put first chunk into buffer, we will put the rest as we receive them
+        self.message_buffer.insert(msg_chunk);
+
+        // we will expect, at least, N - 1 more messages, where N is the number of chunks
+        let mut futures = (0..missing_chunks)
+            .map(|_| Self::proxy_recv(from, Arc::clone(&proxy)))
+            .map(tokio::spawn)
+            .collect::<FuturesUnordered<_>>();
+
+        // Loop until all chunks are received
+        while let Some(fut) = futures.next().await {
+            match fut {
+                Ok((id, fut_res)) => {
+                    let msg = fut_res?;
+                    log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
+
+                    if msg.counter != counter || msg.collective != collective {
+                        // we got a message with another collective or counter, we will need to receive yet another message
+                        futures.push(tokio::spawn(Self::proxy_recv(id, Arc::clone(&proxy))));
+                    }
+
+                    // Put msg into buffer, either if it's a chunk or another unrelated message
                     self.message_buffer.insert(msg);
-                    log::debug!(
-                        "[Worker {}] Put message in buffer, get next message",
-                        self.worker_id
-                    )
+                }
+                Err(e) => {
+                    log::error!("Error receiving message {:?}", e);
                 }
             }
+        }
+
+        log::debug!("[Worker {}] received all chunks", self.worker_id);
+
+        // at this point, we should have all chunks in the buffer
+        if let Some(msg) = self.message_buffer.get(&from, &collective, &counter) {
+            return Ok(msg);
+        } else {
+            // something went wrong
+            // TODO try receiving more messages?
+            return Err("Waited for all chunks but some are missing".into());
         }
     }
 
