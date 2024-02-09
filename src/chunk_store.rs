@@ -31,6 +31,11 @@ pub trait ChunkedMessageBody {
     ///
     /// Panics if the message is not complete.
     fn get_complete_body(self) -> Bytes;
+
+    /// Retrieves the total number of chunks in the message.
+    /// # Returns
+    /// The total number of chunks in the message.
+    fn get_num_chunks_stored(&self) -> u32;
 }
 
 /// A [`ChunkedMessageBody`] implementation that stores the chunks in a [`Vec`].
@@ -38,7 +43,7 @@ pub trait ChunkedMessageBody {
 pub struct VecChunkedMessageBody {
     array: Vec<Bytes>,
     num_chunks: u32,
-    num_chunks_received: u32,
+    num_chunks_stored: u32,
     is_complete: bool,
 }
 
@@ -58,7 +63,7 @@ impl VecChunkedMessageBody {
         Self {
             array,
             num_chunks,
-            num_chunks_received: 0,
+            num_chunks_stored: 0,
             is_complete: false,
         }
     }
@@ -69,14 +74,14 @@ impl ChunkedMessageBody for VecChunkedMessageBody {
         if self.array[chunk_id as usize].is_empty() {
             log::debug!("Inserting chunk {} of {}", chunk_id, self.num_chunks);
             self.array[chunk_id as usize] = chunk;
-            self.num_chunks_received += 1;
-            if self.num_chunks_received == self.num_chunks {
+            self.num_chunks_stored += 1;
+            if self.num_chunks_stored == self.num_chunks {
                 log::debug!("Message is complete");
                 self.is_complete = true;
             } else {
                 log::debug!(
                     "Received {} of {} chunks",
-                    self.num_chunks_received,
+                    self.num_chunks_stored,
                     self.num_chunks
                 );
             }
@@ -96,6 +101,10 @@ impl ChunkedMessageBody for VecChunkedMessageBody {
             data.extend_from_slice(&chunk);
         }
         data.freeze()
+    }
+
+    fn get_num_chunks_stored(&self) -> u32 {
+        self.num_chunks_stored
     }
 }
 
