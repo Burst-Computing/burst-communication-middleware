@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 use async_trait::async_trait;
 
@@ -30,6 +30,7 @@ pub struct S3Options {
     pub prefix: String,
     pub wait_time: f64,
     pub enable_broadcast: bool,
+    pub semaphore_permits: usize,
 }
 
 impl S3Options {
@@ -67,6 +68,7 @@ impl Default for S3Options {
             prefix: "dev".into(),
             wait_time: 0.2,
             enable_broadcast: false,
+            semaphore_permits: 1024,
         }
     }
 }
@@ -158,6 +160,7 @@ pub struct S3Proxy {
 
 pub struct S3SendProxy {
     s3_client: Client,
+    client_semaphore: Arc<Semaphore>,
     s3_options: Arc<S3Options>,
     burst_options: Arc<BurstOptions>,
     worker_id: u32,
@@ -170,6 +173,7 @@ pub struct Keys {
 
 pub struct S3ReceiveProxy {
     s3_client: Client,
+    client_semaphore: Arc<Semaphore>,
     s3_options: Arc<S3Options>,
     burst_options: Arc<BurstOptions>,
     worker_id: u32,
@@ -205,15 +209,18 @@ impl S3Proxy {
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
     ) -> Self {
+        let client_semaphore = Arc::new(Semaphore::new(s3_options.semaphore_permits));
         Self {
             sender: Box::new(S3SendProxy::new(
                 s3_client.clone(),
+                Arc::clone(&client_semaphore),
                 s3_options.clone(),
                 burst_options.clone(),
                 worker_id,
             )),
             receiver: Box::new(S3ReceiveProxy::new(
                 s3_client.clone(),
+                Arc::clone(&client_semaphore),
                 s3_options.clone(),
                 burst_options.clone(),
                 worker_id,
@@ -225,12 +232,14 @@ impl S3Proxy {
 impl S3SendProxy {
     pub fn new(
         s3_client: Client,
+        client_semaphore: Arc<Semaphore>,
         s3_options: Arc<S3Options>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
     ) -> Self {
         Self {
             s3_client,
+            client_semaphore,
             s3_options,
             burst_options,
             worker_id,
@@ -243,6 +252,7 @@ impl SendProxy for S3SendProxy {
     async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         let byte_stream = ByteStream::from(msg.data.clone());
         let key = format_message_key(&self.burst_options.burst_id, dest, &msg);
+        let permit = self.client_semaphore.acquire().await.unwrap();
         self.s3_client
             .put_object()
             .bucket(self.s3_options.bucket.clone())
@@ -256,6 +266,7 @@ impl SendProxy for S3SendProxy {
             .send()
             .await?;
         log::debug!("S3 Put object {}", key);
+        drop(permit);
         Ok(())
     }
 }
@@ -263,12 +274,14 @@ impl SendProxy for S3SendProxy {
 impl S3ReceiveProxy {
     pub fn new(
         s3_client: Client,
+        client_semaphore: Arc<Semaphore>,
         s3_options: Arc<S3Options>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
     ) -> Self {
         Self {
             s3_client,
+            client_semaphore,
             s3_options,
             burst_options,
             worker_id,
@@ -283,8 +296,18 @@ impl S3ReceiveProxy {
 #[async_trait]
 impl ReceiveProxy for S3ReceiveProxy {
     async fn recv(&self) -> Result<Message> {
+        let permit = self.client_semaphore.acquire().await;
+        if permit.is_err() {
+            return Err("Failed to acquire semaphore permit".into());
+        }
+
         loop {
-            let key = get_next_object_key(self).await.unwrap();
+            let key = match get_next_object_key(self).await {
+                Ok(key) => key,
+                Err(err) => {
+                    return Err(err);
+                }
+            };
 
             log::debug!("S3 Get object with key {}...", key);
             let obj = self
@@ -392,6 +415,7 @@ impl ReceiveProxy for S3ReceiveProxy {
                 collective: collective_type,
                 data: Bytes::from(bytes),
             };
+            drop(permit);
             return Ok(msg);
         }
     }
