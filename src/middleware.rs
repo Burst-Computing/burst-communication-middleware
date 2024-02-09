@@ -585,19 +585,42 @@ impl BurstMiddleware {
             panic!("get_complete_message called with non-chunked message")
         }
 
-        let missing_chunks = msg_chunk.num_chunks - 1;
         let from = msg_chunk.sender_id;
         let collective = msg_chunk.collective;
         let counter = msg_chunk.counter;
-        log::debug!(
-            "[Worker {}] Waiting for {} missing chunks for message {:?}",
-            self.worker_id,
-            missing_chunks,
-            msg_chunk
-        );
+        let num_chunks = msg_chunk.num_chunks;
 
         // put first chunk into buffer, we will put the rest as we receive them
         self.message_buffer.insert(msg_chunk);
+
+        // Check if we have some chunks already in the buffer
+        let missing_chunks =
+            match self
+                .message_buffer
+                .num_chunks_stored(&from, &collective, &counter)
+            {
+                Some(n) => num_chunks - n, // we will have at least 1 chunk in the buffer
+                None => panic!("???"),     // we should have at least the first chunk in the buffer
+            };
+
+        if missing_chunks == 0 {
+            // we already have all chunks in the buffer, this was the last one
+            if let Some(msg) = self.message_buffer.get(&from, &collective, &counter) {
+                return Ok(msg);
+            } else {
+                // something went wrong
+                return Err("There are no missing chunks but the message is not complete".into());
+            }
+        }
+
+        log::debug!(
+            "[Worker {}] Waiting for {} missing chunks for message (collective={}, counter={}, sender={})",
+            self.worker_id,
+            missing_chunks,
+            collective,
+            counter,
+            from
+        );
 
         // we will expect, at least, N - 1 more messages, where N is the number of chunks
         let mut futures = (0..missing_chunks)

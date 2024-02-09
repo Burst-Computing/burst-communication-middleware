@@ -102,4 +102,25 @@ impl MessageStoreChunked {
             return None;
         }
     }
+
+    /// Retrieves the number of chunks that have been received for the message that matches the given
+    /// criteria ([`Message::sender_id`], [`Message::collective`], and [`Message::counter`]]).
+    /// This method is thread-safe.
+    /// # Arguments
+    /// * `sender_id` - The sender ID of the message to retrieve.
+    /// * `collective` - The collective type of the message to retrieve.
+    /// * `counter` - The counter value of the message to retrieve.
+    /// # Returns
+    /// The number of chunks that have been received for the message, if any.
+    pub fn num_chunks_stored(
+        &self,
+        sender_id: &u32,
+        collective: &CollectiveType,
+        counter: &u32,
+    ) -> Option<u32> {
+        match self.messages.get(&(*sender_id, *collective, *counter)) {
+            Some(chunk_store) => Some(chunk_store.get_num_chunks_stored()),
+            None => None,
+        }
+    }
 }
