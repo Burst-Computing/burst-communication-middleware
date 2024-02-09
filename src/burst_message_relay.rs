@@ -74,7 +74,7 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
                     .into_iter()
                     .collect::<Vec<_>>(),
             )
-            .await; */
+            .await;  */
 
         for group_id in burst_options.group_ranges.keys() {
             client.create_bc_group(group_id, 1).await;
