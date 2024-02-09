@@ -7,7 +7,7 @@ use redis::{
     streams::{StreamReadOptions, StreamReadReply},
     AsyncCommands, Client,
 };
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
 use crate::{
     impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
@@ -132,10 +132,12 @@ async fn init_redis(
     tokio::spawn(async move {
         let mut last_broadcast_id = "0".to_string();
         loop {
-            let (last_id, msg) = read_redis(&mut connection, &broadcast_stream, &last_broadcast_id)
-                .await
-                .unwrap();
+            let (last_id, stream_reply) =
+                read_stream(&mut connection, &broadcast_stream, &last_broadcast_id)
+                    .await
+                    .unwrap();
             last_broadcast_id = last_id;
+            let msg = deserialize_stream_reply(stream_reply).unwrap();
             broadcast_proxy.broadcast_send(msg).await.unwrap();
         }
     });
@@ -160,7 +162,7 @@ pub struct RedisStreamReceiveProxy {
     redis_options: Arc<RedisStreamOptions>,
     burst_options: Arc<BurstOptions>,
     worker_id: u32,
-    last_id: Arc<RwLock<String>>,
+    last_id: Mutex<String>,
 }
 
 pub struct RedisStreamBroadcastSendProxy {
@@ -234,9 +236,9 @@ impl RedisStreamSendProxy {
 #[async_trait]
 impl ReceiveProxy for RedisStreamReceiveProxy {
     async fn recv(&self) -> Result<Message> {
-        let last_id = self.last_id.read().await.clone();
+        let mut last_id = self.last_id.lock().await;
         let mut con = self.redis_pool.get().await?;
-        let (last_id, msg) = read_redis(
+        let (new_last_id, reply) = read_stream(
             &mut con,
             &get_direct_stream_name(
                 &self.redis_options.direct_stream_prefix,
@@ -247,8 +249,12 @@ impl ReceiveProxy for RedisStreamReceiveProxy {
         )
         .await?;
 
-        *self.last_id.write().await = last_id;
+        *last_id = new_last_id;
+        // drop last_id mutex guard early so we don't hold the lock while deserializing the message
+        drop(last_id);
 
+        let msg = deserialize_stream_reply(reply)?;
+        // log::debug!("[Redis Stream] Got message {:?}", msg);
         Ok(msg)
     }
 }
@@ -265,7 +271,7 @@ impl RedisStreamReceiveProxy {
             redis_options,
             burst_options,
             worker_id,
-            last_id: Arc::new(RwLock::new("0".to_string())),
+            last_id: Mutex::new("0".to_string()),
         }
     }
 }
@@ -367,11 +373,20 @@ where
     Ok(())
 }
 
-async fn read_redis<C>(connection: &mut C, stream: &str, last_id: &str) -> Result<(String, Message)>
+async fn read_stream<C>(
+    connection: &mut C,
+    stream: &str,
+    last_id: &str,
+) -> Result<(String, StreamReadReply)>
 where
     C: ConnectionLike + Send,
 {
-    let r: StreamReadReply = connection
+    // log::debug!(
+    //     "[Redis Stream] Reading from stream {} with last_id {}",
+    //     stream,
+    //     last_id
+    // );
+    let reply: StreamReadReply = connection
         .xread_options(
             &[stream],
             &[last_id],
@@ -379,10 +394,20 @@ where
         )
         .await?;
 
-    let stream_key = r.keys.iter().next().unwrap();
+    let stream_key = reply.keys.iter().next().unwrap();
     let last_id = stream_key.ids.iter().next().unwrap().id.clone();
 
-    let mut m = r
+    // log::debug!(
+    //     "[Redis Stream] Got last_id {} from stream {}",
+    //     last_id,
+    //     stream
+    // );
+
+    return Ok((last_id, reply));
+}
+
+fn deserialize_stream_reply(reply: StreamReadReply) -> Result<Message> {
+    let mut reply_map = reply
         .keys
         .into_iter()
         .next()
@@ -392,16 +417,15 @@ where
         .next()
         .unwrap()
         .map;
-    let header = match m.remove("h").unwrap() {
+    let header = match reply_map.remove("h").unwrap() {
         redis::Value::Data(d) => d,
         _ => panic!("Expected header to be a redis::Value::Data"),
     };
-    let payload = match m.remove("p").unwrap() {
+    let payload = match reply_map.remove("p").unwrap() {
         redis::Value::Data(d) => d,
         _ => panic!("Expected payload to be a redis::Value::Data"),
     };
-    let msg = Message::from((header, payload));
-    Ok((last_id, msg))
+    Ok(Message::from((header, payload)))
 }
 
 fn get_direct_stream_name(prefix: &str, burst_id: &str, worker_id: u32) -> String {

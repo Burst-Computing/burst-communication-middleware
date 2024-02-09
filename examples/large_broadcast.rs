@@ -1,7 +1,7 @@
 use burst_communication_middleware::{
     BurstMiddleware, BurstOptions, Message, MiddlewareActorHandle, RabbitMQMImpl, RabbitMQOptions,
-    RedisListImpl, RedisListOptions, RedisStreamOptions, S3Impl, S3Options, TokioChannelImpl,
-    TokioChannelOptions,
+    RedisListImpl, RedisListOptions, RedisStreamImpl, RedisStreamOptions, S3Impl, S3Options,
+    TokioChannelImpl, TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -50,23 +50,25 @@ fn main() {
             .broadcast_channel_size(256)
             .build();
 
-        let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-            .durable_queues(true)
-            .ack(true)
-            .build();
-        // let s3_options = S3Options::new(env::var("S3_BUCKET").unwrap())
-        //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
-        //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
-        //     .session_token(Some(env::var("AWS_SESSION_TOKEN").unwrap()))
-        //     .region(env::var("S3_REGION").unwrap())
-        //     .endpoint(None)
-        //     .enable_broadcast(true)
+        // let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+        //     .durable_queues(true)
+        //     .ack(true)
         //     .build();
+        let backend_options = S3Options::new(env::var("S3_BUCKET").unwrap())
+            .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
+            .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
+            .session_token(None)
+            .region(env::var("S3_REGION").unwrap())
+            .endpoint(Some("http://localhost:9000".to_string()))
+            .enable_broadcast(true)
+            .wait_time(0.2)
+            .build();
         // let redislist_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
+        // let backend_options = RedisStreamOptions::new("redis://127.0.0.1".to_string());
 
         let fut = tokio_runtime.spawn(BurstMiddleware::create_proxies::<
             TokioChannelImpl,
-            RabbitMQMImpl,
+            S3Impl,
             _,
             _,
         >(burst_options, channel_options, backend_options));

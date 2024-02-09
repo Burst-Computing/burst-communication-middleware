@@ -1,7 +1,7 @@
 use burst_communication_middleware::{
     BurstMiddleware, BurstOptions, Message, MiddlewareActorHandle, RabbitMQMImpl, RabbitMQOptions,
-    RedisListImpl, RedisListOptions, RedisStreamOptions, S3Impl, S3Options, TokioChannelImpl,
-    TokioChannelOptions,
+    RedisListImpl, RedisListOptions, RedisStreamImpl, RedisStreamOptions, S3Impl, S3Options,
+    TokioChannelImpl, TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -10,8 +10,9 @@ use std::{
     env, thread,
 };
 
-const BURST_SIZE: u32 = 512;
+const BURST_SIZE: u32 = 128;
 const GROUPS: u32 = 16;
+const PAYLOAD_SIZE: usize = 4 * 1024 * 1024; // 4MB
 
 fn main() {
     env_logger::init();
@@ -42,17 +43,17 @@ fn main() {
             BurstOptions::new(BURST_SIZE, group_ranges.clone(), group_id.to_string())
                 .burst_id("gather".to_string())
                 .enable_message_chunking(true)
-                .message_chunk_size(4 * 1024 * 1024)
+                .message_chunk_size(1 * 1024 * 1024)
                 .build();
 
         let channel_options = TokioChannelOptions::new()
             .broadcast_channel_size(256)
             .build();
 
-        let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-            .durable_queues(true)
-            .ack(true)
-            .build();
+        // let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+        //     .durable_queues(true)
+        //     .ack(true)
+        //     .build();
         // let s3_options = S3Options::new(env::var("S3_BUCKET").unwrap())
         //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
         //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
@@ -62,10 +63,11 @@ fn main() {
         //     .enable_broadcast(true)
         //     .build();
         // let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
+        let backend_options = RedisStreamOptions::new("redis://127.0.0.1".to_string()).build();
 
         let fut = tokio_runtime.spawn(BurstMiddleware::create_proxies::<
             TokioChannelImpl,
-            RabbitMQMImpl,
+            RedisStreamImpl,
             _,
             _,
         >(burst_options, channel_options, backend_options));
@@ -103,8 +105,9 @@ fn group(proxies: HashMap<u32, MiddlewareActorHandle>) -> Vec<std::thread::JoinH
 }
 
 fn worker(burst_middleware: MiddlewareActorHandle) {
-    let msg = format!("hello from worker {}", burst_middleware.info.worker_id);
-    let data = Bytes::from(msg);
+    // let msg = format!("hello from worker {}", burst_middleware.info.worker_id);
+    // let data = Bytes::from(msg);
+    let data = Bytes::from(vec![0; PAYLOAD_SIZE]);
 
     match burst_middleware.gather(data).unwrap() {
         Some(msgs) => {
