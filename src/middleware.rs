@@ -612,8 +612,9 @@ impl BurstMiddleware {
                     let msg = fut_res?;
                     log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
 
-                    if msg.counter != counter || msg.collective != collective {
-                        // we got a message with another collective or counter, we will need to receive yet another message
+                    if msg.sender_id != id || msg.counter != counter || msg.collective != collective
+                    {
+                        // we got a message with another collective, counter or sender, we will need to receive yet another message
                         futures.push(tokio::spawn(Self::proxy_recv(id, Arc::clone(&proxy))));
                     }
 
