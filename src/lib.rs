@@ -50,6 +50,8 @@ pub enum Backend {
         secret_access_key: Option<String>,
         /// S3 session token
         session_token: Option<String>,
+        // Semphore permits
+        semaphore_permits: Option<usize>,
     },
     /// Use Redis Streams as backend
     RedisStream,
@@ -88,6 +90,7 @@ pub fn create_actors(
                 access_key_id,
                 secret_access_key,
                 session_token,
+                semaphore_permits,
             } => {
                 let mut options = S3Options::default();
                 if let Some(bucket) = bucket {
@@ -104,6 +107,9 @@ pub fn create_actors(
                 }
                 options.session_token(session_token.clone());
                 options.endpoint(conf.server.clone());
+                if let Some(permits) = semaphore_permits {
+                    options.semaphore_permits(*permits);
+                }
 
                 BurstMiddleware::create_proxies::<TokioChannelImpl, S3Impl, _, _>(
                     burst_options,

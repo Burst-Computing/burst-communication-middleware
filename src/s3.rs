@@ -50,6 +50,7 @@ impl S3Options {
     impl_chainable_setter!(prefix, String);
     impl_chainable_setter!(wait_time, f64);
     impl_chainable_setter!(enable_broadcast, bool);
+    impl_chainable_setter!(semaphore_permits, usize);
 
     pub fn build(&self) -> Self {
         self.clone()
