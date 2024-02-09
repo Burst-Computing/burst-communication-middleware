@@ -2,9 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 
-use burst_message_relay::{
-    client::client::Client, client::connection_pool::ConnectionPool,
-};
+use burst_message_relay::{client::client::Client, client::connection_pool::ConnectionPool};
 
 use crate::{
     impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
@@ -69,12 +67,12 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
         let mut client = Client::new(connection_pool.clone());
 
         /* client
-            .init_queues(
-                &(0..burst_options.burst_size)
-                    .into_iter()
-                    .collect::<Vec<_>>(),
-            )
-            .await;  */
+        .init_queues(
+            &(0..burst_options.burst_size)
+                .into_iter()
+                .collect::<Vec<_>>(),
+        )
+        .await;  */
 
         for group_id in burst_options.group_ranges.keys() {
             client.create_bc_group(group_id, 1).await;
@@ -103,16 +101,18 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
         tokio::spawn({
             let b = burst_options.clone();
             async move {
-
                 loop {
-
                     let mut client = Client::new(conn_pool.clone());
 
                     let data = client.broadcast(&b.group_id).await;
                     let msg = Message::from(data);
 
                     if msg.num_chunks == 1 {
-                        broadcast_proxy_arc.clone().broadcast_send(msg).await.unwrap();
+                        broadcast_proxy_arc
+                            .clone()
+                            .broadcast_send(msg)
+                            .await
+                            .unwrap();
                     } else {
                         let group_id = b.group_id.clone();
                         let missing_chunks = msg.num_chunks - 1;
@@ -124,8 +124,7 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
                             let bc_proxy_arc = broadcast_proxy_arc.clone();
                             let gp_id = group_id.clone();
                             let task = tokio::spawn(async move {
-                                let mut client =
-                                    Client::new(connection_pool.clone());
+                                let mut client = Client::new(connection_pool.clone());
                                 let data = client.broadcast(&gp_id).await;
                                 let msg = Message::from(data);
                                 bc_proxy_arc.broadcast_send(msg).await.unwrap();
@@ -232,9 +231,7 @@ impl StreamServerSendProxy {
         _server_options: Arc<BurstMessageRelayOptions>,
         connection_pool: Arc<ConnectionPool>,
     ) -> Result<Self> {
-        Ok(Self {
-            connection_pool,
-        })
+        Ok(Self { connection_pool })
     }
 }
 
@@ -269,7 +266,6 @@ impl BroadcastSendProxy for StreamServerBroadcastProxy {
         if msg.collective != CollectiveType::Broadcast {
             Err("Cannot send non-broadcast message to broadcast".into())
         } else {
-
             let mut tasks = Vec::new();
 
             for dest in self
