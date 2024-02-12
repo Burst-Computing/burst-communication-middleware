@@ -1,13 +1,13 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use deadpool_redis::{Config, Pool, Runtime};
 use redis::{
     aio::{ConnectionLike, MultiplexedConnection},
     streams::{StreamReadOptions, StreamReadReply},
     AsyncCommands, Client,
 };
-use tokio::sync::Mutex;
 
 use crate::{
     impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
@@ -163,7 +163,7 @@ pub struct RedisStreamReceiveProxy {
     redis_options: Arc<RedisStreamOptions>,
     burst_options: Arc<BurstOptions>,
     worker_id: u32,
-    stream_ids: Mutex<HashMap<u32, String>>,
+    stream_ids: DashMap<u32, String>,
 }
 
 pub struct RedisStreamBroadcastSendProxy {
@@ -248,11 +248,10 @@ impl RedisStreamSendProxy {
 #[async_trait]
 impl ReceiveProxy for RedisStreamReceiveProxy {
     async fn recv(&self, source: u32) -> Result<Message> {
-        let mut last_ids = self.stream_ids.lock().await;
-
-        let last_id = match last_ids.get(&source) {
-            Some(id) => id,
-            None => "0",
+        log::debug!("[Redis Stream] Getting message from source {}", source);
+        let last_id = match self.stream_ids.get(&source) {
+            Some(id) => id.value().clone(),
+            None => "0".to_string(),
         };
 
         let mut con = self.redis_pool.get().await?;
@@ -268,9 +267,7 @@ impl ReceiveProxy for RedisStreamReceiveProxy {
         )
         .await?;
 
-        last_ids.insert(source, new_last_id);
-        // drop last_id mutex guard early so we don't hold the lock while deserializing the message
-        drop(last_ids);
+        self.stream_ids.insert(source, new_last_id);
 
         let msg = deserialize_stream_reply(reply)?;
         // log::debug!("[Redis Stream] Got message {:?}", msg);
@@ -285,8 +282,7 @@ impl RedisStreamReceiveProxy {
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
     ) -> Self {
-        let stream_offsets: Mutex<HashMap<u32, String>> =
-            Mutex::new(HashMap::with_capacity(burst_options.burst_size as usize));
+        let stream_offsets = DashMap::with_capacity(burst_options.burst_size as usize);
         Self {
             redis_pool,
             redis_options,
