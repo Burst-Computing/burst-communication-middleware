@@ -26,7 +26,7 @@ pub trait SendProxy: Send + Sync {
 
 #[async_trait]
 pub trait ReceiveProxy: Send + Sync {
-    async fn recv(&self) -> Result<Message>;
+    async fn recv(&self, source: u32) -> Result<Message>;
 }
 
 pub trait BroadcastProxy: BroadcastSendProxy + BroadcastReceiveProxy + Send + Sync {}
@@ -552,7 +552,7 @@ impl BurstMiddleware {
             } else {
                 &self.remote_send_receive
             };
-            let msg = proxy.recv().await?;
+            let msg = proxy.recv(from).await?;
 
             log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
 
@@ -854,7 +854,7 @@ impl BurstMiddleware {
     }
 
     async fn proxy_recv(from: u32, proxy: Arc<dyn SendReceiveProxy>) -> (u32, Result<Message>) {
-        (from, proxy.recv().await)
+        (from, proxy.recv(from).await)
     }
 
     async fn proxy_send(to: u32, proxy: Arc<dyn SendReceiveProxy>, msg: Message) -> Result<()> {

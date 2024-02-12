@@ -316,8 +316,8 @@ impl SendProxy for RabbitMQProxy {
 
 #[async_trait]
 impl ReceiveProxy for RabbitMQProxy {
-    async fn recv(&self) -> Result<Message> {
-        self.receiver.recv().await
+    async fn recv(&self, source: u32) -> Result<Message> {
+        self.receiver.recv(source).await
     }
 }
 
@@ -379,7 +379,7 @@ impl RabbitMQSendProxy {
 
 #[async_trait]
 impl ReceiveProxy for RabbitMQReceiveProxy {
-    async fn recv(&self) -> Result<Message> {
+    async fn recv(&self, source: u32) -> Result<Message> {
         let delivery = self.consumer.clone().try_next().await?;
         let delivery = delivery.ok_or("No message received")?;
         log::debug!(
