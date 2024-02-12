@@ -217,7 +217,7 @@ impl TokioChannelSendProxy {
 
 #[async_trait]
 impl ReceiveProxy for TokioChannelReceiveProxy {
-    async fn recv(&self, source: u32) -> Result<Message> {
+    async fn recv(&self, _source: u32) -> Result<Message> {
         // Receive from local channel
         // receive blocking
         if let Some(msg) = self.local_channel_rx.lock().await.recv().await {
