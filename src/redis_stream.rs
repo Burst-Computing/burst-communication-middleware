@@ -10,8 +10,8 @@ use redis::{
 use tokio::sync::Mutex;
 
 use crate::{
-    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
-    Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BroadcastProxy, BroadcastSendProxy, BurstOptions, CollectiveType,
+    Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
 };
 
 #[derive(Clone, Debug)]
@@ -55,64 +55,64 @@ impl SendReceiveFactory<RedisStreamOptions> for RedisStreamImpl {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         redis_options: RedisStreamOptions,
-        broadcast_proxy: Box<dyn BroadcastSendProxy>,
     ) -> Result<(
         HashMap<u32, Box<dyn SendReceiveProxy>>,
-        Box<dyn BroadcastSendProxy>,
+        Arc<dyn BroadcastProxy>,
     )> {
-        let redis_options = Arc::new(redis_options);
-        // create redis pool with deadpool
-        let group_size = burst_options
-            .group_ranges
-            .get(&burst_options.group_id)
-            .unwrap()
-            .len();
-        let pool = Config::from_url(redis_options.redis_uri.clone())
-            .builder()
-            .unwrap()
-            .max_size(group_size as usize)
-            .runtime(Runtime::Tokio1)
-            .build()
-            .unwrap();
+        Err("Not implemented".into())
+        // let redis_options = Arc::new(redis_options);
+        // // create redis pool with deadpool
+        // let group_size = burst_options
+        //     .group_ranges
+        //     .get(&burst_options.group_id)
+        //     .unwrap()
+        //     .len();
+        // let pool = Config::from_url(redis_options.redis_uri.clone())
+        //     .builder()
+        //     .unwrap()
+        //     .max_size(group_size as usize)
+        //     .runtime(Runtime::Tokio1)
+        //     .build()
+        //     .unwrap();
 
-        init_redis(
-            burst_options.clone(),
-            redis_options.clone(),
-            broadcast_proxy,
-        )
-        .await?;
+        // init_redis(
+        //     burst_options.clone(),
+        //     redis_options.clone(),
+        //     broadcast_proxy,
+        // )
+        // .await?;
 
-        let current_group = burst_options
-            .group_ranges
-            .get(&burst_options.group_id)
-            .unwrap();
+        // let current_group = burst_options
+        //     .group_ranges
+        //     .get(&burst_options.group_id)
+        //     .unwrap();
 
-        let mut hmap = HashMap::new();
+        // let mut hmap = HashMap::new();
 
-        futures::future::try_join_all(current_group.iter().map(|worker_id| {
-            let p = pool.clone();
-            let r = redis_options.clone();
-            let b = burst_options.clone();
-            async move { RedisStreamProxy::new(p, r, b, *worker_id).await }
-        }))
-        .await?
-        .into_iter()
-        .for_each(|proxy| {
-            hmap.insert(
-                proxy.worker_id,
-                Box::new(proxy) as Box<dyn SendReceiveProxy>,
-            );
-        });
+        // futures::future::try_join_all(current_group.iter().map(|worker_id| {
+        //     let p = pool.clone();
+        //     let r = redis_options.clone();
+        //     let b = burst_options.clone();
+        //     async move { RedisStreamProxy::new(p, r, b, *worker_id).await }
+        // }))
+        // .await?
+        // .into_iter()
+        // .for_each(|proxy| {
+        //     hmap.insert(
+        //         proxy.worker_id,
+        //         Box::new(proxy) as Box<dyn SendReceiveProxy>,
+        //     );
+        // });
 
-        let broadcast_client = Client::open(redis_options.redis_uri.clone())?;
-        Ok((
-            hmap,
-            Box::new(RedisStreamBroadcastSendProxy::new(
-                broadcast_client.get_multiplexed_async_connection().await?,
-                redis_options,
-                burst_options,
-            )) as Box<dyn BroadcastSendProxy>,
-        ))
+        // let broadcast_client = Client::open(redis_options.redis_uri.clone())?;
+        // Ok((
+        //     hmap,
+        //     Box::new(RedisStreamBroadcastSendProxy::new(
+        //         broadcast_client.get_multiplexed_async_connection().await?,
+        //         redis_options,
+        //         burst_options,
+        //     )) as Box<dyn BroadcastSendProxy>,
+        // ))
     }
 }
 

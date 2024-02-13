@@ -15,8 +15,8 @@ use aws_sdk_s3::{primitives::ByteStream, Client};
 use bytes::Bytes;
 
 use crate::{
-    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
-    Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BroadcastProxy, BroadcastSendProxy, BurstOptions, CollectiveType,
+    Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
 };
 
 #[derive(Clone, Debug)]
@@ -81,76 +81,76 @@ impl SendReceiveFactory<S3Options> for S3Impl {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         s3_options: S3Options,
-        broadcast_proxy: Box<dyn BroadcastSendProxy>,
     ) -> Result<(
         HashMap<u32, Box<dyn SendReceiveProxy>>,
-        Box<dyn BroadcastSendProxy>,
+        Arc<dyn BroadcastProxy>,
     )> {
-        let credentials_provider = Credentials::from_keys(
-            s3_options.access_key_id.clone(),
-            s3_options.secret_access_key.clone(),
-            s3_options.session_token.clone(),
-        );
+        Err("Not implemented".into())
+        // let credentials_provider = Credentials::from_keys(
+        //     s3_options.access_key_id.clone(),
+        //     s3_options.secret_access_key.clone(),
+        //     s3_options.session_token.clone(),
+        // );
 
-        let config = match s3_options.endpoint.clone() {
-            Some(endpoint) => {
-                aws_sdk_s3::config::Builder::new()
-                    .endpoint_url(endpoint)
-                    .credentials_provider(credentials_provider)
-                    .region(Region::new(s3_options.region.clone()))
-                    .force_path_style(true) // apply bucketname as path param instead of pre-domain
-                    .build()
-            }
-            None => aws_sdk_s3::config::Builder::new()
-                .credentials_provider(credentials_provider)
-                .region(Region::new(s3_options.region.clone()))
-                .build(),
-        };
-        let bcast_config = config.clone();
-        let s3_client = Client::from_conf(config.clone());
+        // let config = match s3_options.endpoint.clone() {
+        //     Some(endpoint) => {
+        //         aws_sdk_s3::config::Builder::new()
+        //             .endpoint_url(endpoint)
+        //             .credentials_provider(credentials_provider)
+        //             .region(Region::new(s3_options.region.clone()))
+        //             .force_path_style(true) // apply bucketname as path param instead of pre-domain
+        //             .build()
+        //     }
+        //     None => aws_sdk_s3::config::Builder::new()
+        //         .credentials_provider(credentials_provider)
+        //         .region(Region::new(s3_options.region.clone()))
+        //         .build(),
+        // };
+        // let bcast_config = config.clone();
+        // let s3_client = Client::from_conf(config.clone());
 
-        let bucket = s3_client
-            .head_bucket()
-            .bucket(s3_options.bucket.clone())
-            .send()
-            .await?;
-        log::debug!("Bucket: {:?}", bucket);
+        // let bucket = s3_client
+        //     .head_bucket()
+        //     .bucket(s3_options.bucket.clone())
+        //     .send()
+        //     .await?;
+        // log::debug!("Bucket: {:?}", bucket);
 
-        let s3_options = Arc::new(s3_options);
-        let current_group = burst_options
-            .group_ranges
-            .get(&burst_options.group_id)
-            .unwrap();
+        // let s3_options = Arc::new(s3_options);
+        // let current_group = burst_options
+        //     .group_ranges
+        //     .get(&burst_options.group_id)
+        //     .unwrap();
 
-        let mut hmap = HashMap::new();
+        // let mut hmap = HashMap::new();
 
-        for worker_id in current_group {
-            let p = S3Proxy::new(
-                Client::from_conf(config.clone()),
-                s3_options.clone(),
-                burst_options.clone(),
-                *worker_id,
-            );
-            hmap.insert(*worker_id, Box::new(p) as Box<dyn SendReceiveProxy>);
-        }
+        // for worker_id in current_group {
+        //     let p = S3Proxy::new(
+        //         Client::from_conf(config.clone()),
+        //         s3_options.clone(),
+        //         burst_options.clone(),
+        //         *worker_id,
+        //     );
+        //     hmap.insert(*worker_id, Box::new(p) as Box<dyn SendReceiveProxy>);
+        // }
 
-        if s3_options.enable_broadcast {
-            tokio::spawn(broadcast_loop(
-                burst_options.clone(),
-                s3_options.clone(),
-                s3_client,
-                broadcast_proxy,
-            ));
-        }
+        // if s3_options.enable_broadcast {
+        //     tokio::spawn(broadcast_loop(
+        //         burst_options.clone(),
+        //         s3_options.clone(),
+        //         s3_client,
+        //         broadcast_proxy,
+        //     ));
+        // }
 
-        Ok((
-            hmap,
-            Box::new(S3BroadcastSendProxy::new(
-                Client::from_conf(bcast_config),
-                s3_options,
-                burst_options,
-            )),
-        ))
+        // Ok((
+        //     hmap,
+        //     Box::new(S3BroadcastSendProxy::new(
+        //         Client::from_conf(bcast_config),
+        //         s3_options,
+        //         burst_options,
+        //     )),
+        // ))
     }
 }
 

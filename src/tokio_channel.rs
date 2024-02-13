@@ -50,8 +50,8 @@ impl SendReceiveLocalFactory<TokioChannelOptions> for TokioChannelImpl {
         burst_options: Arc<BurstOptions>,
         channel_options: TokioChannelOptions,
     ) -> Result<(
-        HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>,
-        Box<dyn BroadcastSendProxy>,
+        HashMap<u32, Box<dyn SendReceiveProxy>>,
+        Arc<dyn BroadcastProxy>,
     )> {
         let current_group = burst_options
             .group_ranges

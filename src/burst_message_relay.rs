@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use burst_message_relay::{client::client::Client, client::connection_pool::ConnectionPool};
 
 use crate::{
-    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
-    Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BroadcastProxy, BroadcastSendProxy, BurstOptions, CollectiveType,
+    Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
 };
 
 #[derive(Clone)]
@@ -46,109 +46,109 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         server_options: BurstMessageRelayOptions,
-        broadcast_proxy: Box<dyn BroadcastSendProxy>,
     ) -> Result<(
         HashMap<u32, Box<dyn SendReceiveProxy>>,
-        Box<dyn BroadcastSendProxy>,
+        Arc<dyn BroadcastProxy>,
     )> {
-        let current_group = burst_options
-            .group_ranges
-            .get(&burst_options.group_id)
-            .unwrap();
+        Err("Not implemented".into())
+        // let current_group = burst_options
+        //     .group_ranges
+        //     .get(&burst_options.group_id)
+        //     .unwrap();
 
-        let server_options = Arc::new(server_options);
+        // let server_options = Arc::new(server_options);
 
-        let connection_pool = Arc::new(ConnectionPool::new(
-            &server_options.server_uri,
-            current_group.len() as u32 + 1,
-        ));
-        connection_pool.initialize_conns().await;
+        // let connection_pool = Arc::new(ConnectionPool::new(
+        //     &server_options.server_uri,
+        //     current_group.len() as u32 + 1,
+        // ));
+        // connection_pool.initialize_conns().await;
 
-        let mut client = Client::new(connection_pool.clone());
+        // let mut client = Client::new(connection_pool.clone());
 
-        /* client
-        .init_queues(
-            &(0..burst_options.burst_size)
-                .into_iter()
-                .collect::<Vec<_>>(),
-        )
-        .await;  */
+        // /* client
+        // .init_queues(
+        //     &(0..burst_options.burst_size)
+        //         .into_iter()
+        //         .collect::<Vec<_>>(),
+        // )
+        // .await;  */
 
-        for group_id in burst_options.group_ranges.keys() {
-            client.create_bc_group(group_id, 1).await;
-        }
+        // for group_id in burst_options.group_ranges.keys() {
+        //     client.create_bc_group(group_id, 1).await;
+        // }
 
-        let mut hmap = HashMap::new();
+        // let mut hmap = HashMap::new();
 
-        futures::future::try_join_all(current_group.iter().map(|worker_id| {
-            let o = server_options.clone();
-            let conn_pool_clone = connection_pool.clone();
-            async move { StreamServerProxy::new(o, conn_pool_clone.clone(), *worker_id).await }
-        }))
-        .await?
-        .into_iter()
-        .for_each(|proxy| {
-            hmap.insert(
-                proxy.worker_id,
-                Box::new(proxy) as Box<dyn SendReceiveProxy>,
-            );
-        });
+        // futures::future::try_join_all(current_group.iter().map(|worker_id| {
+        //     let o = server_options.clone();
+        //     let conn_pool_clone = connection_pool.clone();
+        //     async move { StreamServerProxy::new(o, conn_pool_clone.clone(), *worker_id).await }
+        // }))
+        // .await?
+        // .into_iter()
+        // .for_each(|proxy| {
+        //     hmap.insert(
+        //         proxy.worker_id,
+        //         Box::new(proxy) as Box<dyn SendReceiveProxy>,
+        //     );
+        // });
 
-        let broadcast_proxy_arc = Arc::new(broadcast_proxy);
+        // let broadcast_proxy_arc = Arc::new(broadcast_proxy);
 
-        //spawn task to receive broadcast messages and send them to the broadcast proxy
-        let conn_pool = connection_pool.clone();
-        tokio::spawn({
-            let b = burst_options.clone();
-            async move {
-                loop {
-                    let mut client = Client::new(conn_pool.clone());
+        // //spawn task to receive broadcast messages and send them to the broadcast proxy
+        // let conn_pool = connection_pool.clone();
+        // tokio::spawn({
+        //     let b = burst_options.clone();
+        //     async move {
+        //         loop {
+        //             let mut client = Client::new(conn_pool.clone());
 
-                    let data = client.broadcast(&b.group_id).await;
-                    let msg = Message::from(data);
+        //             let data = client.broadcast(&b.group_id).await;
+        //             let msg = Message::from(data);
 
-                    if msg.num_chunks == 1 {
-                        broadcast_proxy_arc
-                            .clone()
-                            .broadcast_send(msg)
-                            .await
-                            .unwrap();
-                    } else {
-                        let group_id = b.group_id.clone();
-                        let missing_chunks = msg.num_chunks - 1;
-                        broadcast_proxy_arc.broadcast_send(msg).await.unwrap();
+        //             if msg.num_chunks == 1 {
+        //                 broadcast_proxy_arc
+        //                     .clone()
+        //                     .broadcast_send(msg)
+        //                     .await
+        //                     .unwrap();
+        //             } else {
+        //                 let group_id = b.group_id.clone();
+        //                 let missing_chunks = msg.num_chunks - 1;
+        //                 broadcast_proxy_arc.broadcast_send(msg).await.unwrap();
 
-                        let mut tasks = Vec::new();
-                        for _ in 0..missing_chunks {
-                            let connection_pool = conn_pool.clone();
-                            let bc_proxy_arc = broadcast_proxy_arc.clone();
-                            let gp_id = group_id.clone();
-                            let task = tokio::spawn(async move {
-                                let mut client = Client::new(connection_pool.clone());
-                                let data = client.broadcast(&gp_id).await;
-                                let msg = Message::from(data);
-                                bc_proxy_arc.broadcast_send(msg).await.unwrap();
-                            });
-                            tasks.push(task);
-                        }
+        //                 let mut tasks = Vec::new();
+        //                 for _ in 0..missing_chunks {
+        //                     let connection_pool = conn_pool.clone();
+        //                     let bc_proxy_arc = broadcast_proxy_arc.clone();
+        //                     let gp_id = group_id.clone();
+        //                     let task = tokio::spawn(async move {
+        //                         let mut client = Client::new(connection_pool.clone());
+        //                         let data = client.broadcast(&gp_id).await;
+        //                         let msg = Message::from(data);
+        //                         bc_proxy_arc.broadcast_send(msg).await.unwrap();
+        //                     });
+        //                     tasks.push(task);
+        //                 }
 
-                        futures::future::join_all(tasks).await;
-                    }
-                }
-            }
-        });
+        //                 futures::future::join_all(tasks).await;
+        //             }
+        //         }
+        //     }
+        // });
 
-        Ok((
-            hmap,
-            Box::new(
-                StreamServerBroadcastProxy::new(
-                    server_options,
-                    connection_pool.clone(),
-                    burst_options,
-                )
-                .await?,
-            ),
-        ))
+        // Ok((
+        //     hmap,
+        //     Box::new(
+        //         StreamServerBroadcastProxy::new(
+        //             server_options,
+        //             connection_pool.clone(),
+        //             burst_options,
+        //         )
+        //         .await?,
+        //     ),
+        // ))
     }
 }
 

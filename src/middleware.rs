@@ -46,10 +46,9 @@ pub trait SendReceiveFactory<T>: Send + Sync {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         options: T,
-        broadcast_proxy: Box<dyn BroadcastSendProxy>,
     ) -> Result<(
         HashMap<u32, Box<dyn SendReceiveProxy>>,
-        Box<dyn BroadcastSendProxy>,
+        Arc<dyn BroadcastProxy>,
     )>;
 }
 
@@ -59,8 +58,8 @@ pub trait SendReceiveLocalFactory<T>: Send + Sync {
         burst_options: Arc<BurstOptions>,
         options: T,
     ) -> Result<(
-        HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>,
-        Box<dyn BroadcastSendProxy>,
+        HashMap<u32, Box<dyn SendReceiveProxy>>,
+        Arc<dyn BroadcastProxy>,
     )>;
 }
 
@@ -116,12 +115,13 @@ pub struct BurstMiddleware {
 
     worker_id: u32,
     group: HashSet<u32>,
+    group_worker_leader: u32,
 
     local_send_receive: Arc<dyn SendReceiveProxy>,
     remote_send_receive: Arc<dyn SendReceiveProxy>,
 
     local_broadcast: Arc<dyn BroadcastProxy>,
-    remote_broadcast_send: Arc<dyn BroadcastSendProxy>,
+    remote_broadcast: Arc<dyn BroadcastProxy>,
 
     collective_counters: HashMap<CollectiveType, u32>,
     send_counters: HashMap<u32, u32>,
@@ -148,25 +148,22 @@ impl BurstMiddleware {
         let options = Arc::new(options);
         let current_group = options.group_ranges.get(&options.group_id).unwrap();
 
-        let (mut local_proxies, broadcast_send) =
+        let (mut local_proxies, local_broadcast_proxy) =
             LocalImpl::create_proxies(options.clone(), local_impl_options).await?;
-        let (mut remote_proxies, broadcast_send) =
-            RemoteImpl::create_proxies(options.clone(), remote_impl_options, broadcast_send)
-                .await?;
-
-        let broadcast_send: Arc<dyn BroadcastSendProxy> = broadcast_send.into();
+        let (mut remote_proxies, remote_broadcast_proxy) =
+            RemoteImpl::create_proxies(options.clone(), remote_impl_options).await?;
 
         let mut proxies = HashMap::new();
 
         for id in current_group {
-            let (lsp, lbp) = local_proxies.remove(id).unwrap();
-            let rsp = remote_proxies.remove(id).unwrap();
+            let local_proxy = local_proxies.remove(id).unwrap();
+            let remote_proxy = remote_proxies.remove(id).unwrap();
             let proxy = BurstMiddleware::new(
                 options.clone(),
-                lsp.into(),
-                rsp.into(),
-                lbp.into(),
-                broadcast_send.clone(),
+                local_proxy.into(),
+                remote_proxy.into(),
+                local_broadcast_proxy.clone(),
+                remote_broadcast_proxy.clone(),
                 *id,
                 current_group.clone(),
             );
@@ -178,10 +175,10 @@ impl BurstMiddleware {
 
     pub fn new(
         options: Arc<BurstOptions>,
-        local_send_receive: Arc<dyn SendReceiveProxy>,
-        remote_send_receive: Arc<dyn SendReceiveProxy>,
+        local_send_receive: Box<dyn SendReceiveProxy>,
+        remote_send_receive: Box<dyn SendReceiveProxy>,
         local_broadcast: Arc<dyn BroadcastProxy>,
-        remote_broadcast_send: Arc<dyn BroadcastSendProxy>,
+        remote_broadcast: Arc<dyn BroadcastProxy>,
         worker_id: u32,
         group: HashSet<u32>,
     ) -> Self {
@@ -216,14 +213,18 @@ impl BurstMiddleware {
             ],
         );
 
+        // The worker with the lowest id in the group is the group leader
+        let group_worker_leader = *group.iter().min().unwrap();
+
         Self {
             options,
             worker_id,
             group,
-            local_send_receive,
-            remote_send_receive,
+            group_worker_leader,
+            local_send_receive: local_send_receive.into(),
+            remote_send_receive: remote_send_receive.into(),
             local_broadcast,
-            remote_broadcast_send,
+            remote_broadcast,
             collective_counters: counters,
             send_counters,
             receive_counters,
@@ -258,11 +259,11 @@ impl BurstMiddleware {
         return Ok(msg);
     }
 
-    pub async fn broadcast(&mut self, data: Option<Bytes>) -> Result<Message> {
+    pub async fn broadcast(&mut self, root: u32, data: Option<Bytes>) -> Result<Message> {
         let counter = Self::get_counter(&self.collective_counters, &CollectiveType::Broadcast)?;
 
-        // If root worker, broadcast
-        if self.worker_id == ROOT_ID {
+        if self.worker_id == root {
+            // The root worker sends the broadcast message
             let data = data.expect("Root worker must send data");
 
             let msg = Message {
@@ -274,7 +275,7 @@ impl BurstMiddleware {
                 data,
             };
 
-            // for local send we do in one chunk only
+            // Send the message to the local channel for the local group
             let local_fut = self.local_broadcast.broadcast_send(msg.clone());
 
             if self.enable_message_chunking {
@@ -284,29 +285,34 @@ impl BurstMiddleware {
 
                 let futures = chunked_messages
                     .into_iter()
-                    .map(|msg| Self::broadcast_send(Arc::clone(&self.remote_broadcast_send), msg))
+                    .map(|msg| Self::broadcast_send(Arc::clone(&self.remote_broadcast), msg))
                     .map(tokio::spawn)
                     .collect::<FuturesUnordered<_>>();
                 futures::future::try_join_all(futures).await?;
             } else {
                 // do remote send in one chunk
-                self.remote_broadcast_send.broadcast_send(msg).await?;
+                self.remote_broadcast.broadcast_send(msg).await?;
             }
 
             local_fut.await?;
+        } else {
+            // For non-root workers, check if the root worker is remote
+            // and if this worker is the group leader
+            if !self.group.contains(&root) && self.worker_id == self.group_worker_leader {
+                // Only the group leader receives the broadcast message via the remote channel
+                // And it will send it to the rest of the group via the local channel
+                let msg = self.remote_broadcast.broadcast_recv().await?;
+                self.local_broadcast.broadcast_send(msg).await?;
+            }
         }
 
-        // Broadcast messages will only be received via the local channel
-        // Remote broadcast messages will be sent to the local channel
-        // by a separate thread
-        // Root worker and local group workers will receive the broadcast message
-        // via the local channel
-        let m = self.get_broadcast_message(counter).await?;
-
+        // Eventually all workers (root, local and remote)
+        // will receive the broadcast message via the local channel
+        let msg = self.local_broadcast.broadcast_recv().await?;
         // Increment broadcast counter
         Self::increment_counter(&mut self.collective_counters, &CollectiveType::Broadcast)?;
 
-        Ok(m)
+        Ok(msg)
     }
 
     pub async fn gather(&mut self, data: Bytes) -> Result<Option<Vec<Message>>> {
@@ -861,7 +867,7 @@ impl BurstMiddleware {
         proxy.send(to, msg).await
     }
 
-    async fn broadcast_send(proxy: Arc<dyn BroadcastSendProxy>, msg: Message) -> Result<()> {
+    async fn broadcast_send(proxy: Arc<dyn BroadcastProxy>, msg: Message) -> Result<()> {
         proxy.broadcast_send(msg).await
     }
 

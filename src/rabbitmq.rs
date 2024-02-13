@@ -17,8 +17,8 @@ use lapin::{
 use uuid::Uuid;
 
 use crate::{
-    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
-    Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BroadcastProxy, BroadcastSendProxy, BurstOptions, CollectiveType,
+    Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
 };
 
 #[derive(Clone, Debug)]
@@ -80,56 +80,56 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         rabbitmq_options: RabbitMQOptions,
-        broadcast_proxy: Box<dyn BroadcastSendProxy>,
     ) -> Result<(
         HashMap<u32, Box<dyn SendReceiveProxy>>,
-        Box<dyn BroadcastSendProxy>,
+        Arc<dyn BroadcastProxy>,
     )> {
-        let rabbitmq_options = Arc::new(rabbitmq_options);
+        Err("Not implemented".into())
+        // let rabbitmq_options = Arc::new(rabbitmq_options);
 
-        let current_group = burst_options
-            .group_ranges
-            .get(&burst_options.group_id)
-            .unwrap();
+        // let current_group = burst_options
+        //     .group_ranges
+        //     .get(&burst_options.group_id)
+        //     .unwrap();
 
-        // Create pool of connections
-        let mut config = Config::default();
-        let mut pool_config = PoolConfig::default();
-        pool_config.max_size = rabbitmq_options.pool_size.unwrap_or(current_group.len());
-        config.url = Some(rabbitmq_options.rabbitmq_uri.to_string());
-        config.pool = Some(pool_config);
-        let pool = config.create_pool(Some(Runtime::Tokio1)).unwrap();
+        // // Create pool of connections
+        // let mut config = Config::default();
+        // let mut pool_config = PoolConfig::default();
+        // pool_config.max_size = rabbitmq_options.pool_size.unwrap_or(current_group.len());
+        // config.url = Some(rabbitmq_options.rabbitmq_uri.to_string());
+        // config.pool = Some(pool_config);
+        // let pool = config.create_pool(Some(Runtime::Tokio1)).unwrap();
 
-        init_rabbit(
-            pool.clone(),
-            burst_options.clone(),
-            rabbitmq_options.clone(),
-            broadcast_proxy,
-        )
-        .await?;
+        // init_rabbit(
+        //     pool.clone(),
+        //     burst_options.clone(),
+        //     rabbitmq_options.clone(),
+        //     broadcast_proxy,
+        // )
+        // .await?;
 
-        let mut hmap = HashMap::new();
+        // let mut hmap = HashMap::new();
 
-        futures::future::try_join_all(current_group.iter().map(|worker_id| {
-            let r = rabbitmq_options.clone();
-            let b = burst_options.clone();
-            let p = pool.clone();
-            async move { RabbitMQProxy::new(r, b, *worker_id, p).await }
-        }))
-        .await?
-        .into_iter()
-        .for_each(|proxy| {
-            hmap.insert(
-                proxy.worker_id,
-                Box::new(proxy) as Box<dyn SendReceiveProxy>,
-            );
-        });
+        // futures::future::try_join_all(current_group.iter().map(|worker_id| {
+        //     let r = rabbitmq_options.clone();
+        //     let b = burst_options.clone();
+        //     let p = pool.clone();
+        //     async move { RabbitMQProxy::new(r, b, *worker_id, p).await }
+        // }))
+        // .await?
+        // .into_iter()
+        // .for_each(|proxy| {
+        //     hmap.insert(
+        //         proxy.worker_id,
+        //         Box::new(proxy) as Box<dyn SendReceiveProxy>,
+        //     );
+        // });
 
-        Ok((
-            hmap,
-            Box::new(RabbitMQBroadcastSendProxy::new(rabbitmq_options, burst_options, pool).await?)
-                as Box<dyn BroadcastSendProxy>,
-        ))
+        // Ok((
+        //     hmap,
+        //     Box::new(RabbitMQBroadcastSendProxy::new(rabbitmq_options, burst_options, pool).await?)
+        //         as Box<dyn BroadcastSendProxy>,
+        // ))
     }
 }
 
