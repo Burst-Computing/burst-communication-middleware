@@ -581,7 +581,7 @@ impl BurstMiddleware {
         msg_chunk: Message,
         proxy: Arc<dyn SendReceiveProxy>,
     ) -> Result<Message> {
-        if !self.enable_message_chunking || (msg_chunk.num_chunks - 1) < 2 {
+        if !self.enable_message_chunking || (msg_chunk.num_chunks) < 2 {
             panic!("get_complete_message called with non-chunked message")
         }
 
