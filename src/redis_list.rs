@@ -153,6 +153,7 @@ pub struct RedisListSendProxy {
     redis_pool: Pool,
     redis_options: Arc<RedisListOptions>,
     burst_options: Arc<BurstOptions>,
+    worker_id: u32,
 }
 
 pub struct RedisListReceiveProxy {
@@ -179,8 +180,8 @@ impl SendProxy for RedisListProxy {
 
 #[async_trait]
 impl ReceiveProxy for RedisListProxy {
-    async fn recv(&self) -> Result<Message> {
-        self.receiver.recv().await
+    async fn recv(&self, source: u32) -> Result<Message> {
+        self.receiver.recv(source).await
     }
 }
 
@@ -197,6 +198,7 @@ impl RedisListProxy {
                 redis_pool.clone(),
                 redis_options.clone(),
                 burst_options.clone(),
+                worker_id,
             )),
             receiver: Box::new(RedisListReceiveProxy::new(
                 redis_pool.clone(),
@@ -213,11 +215,13 @@ impl RedisListSendProxy {
         redis_pool: Pool,
         redis_options: Arc<RedisListOptions>,
         burst_options: Arc<BurstOptions>,
+        worker_id: u32,
     ) -> Self {
         Self {
             redis_pool,
             redis_options,
             burst_options,
+            worker_id,
         }
     }
 }
@@ -226,7 +230,15 @@ impl RedisListSendProxy {
 impl SendProxy for RedisListSendProxy {
     async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         let con = self.redis_pool.get().await?;
-        Ok(send_direct(con, msg, dest, &self.redis_options, &self.burst_options).await?)
+        Ok(send_direct(
+            con,
+            msg,
+            self.worker_id,
+            dest,
+            &self.redis_options,
+            &self.burst_options,
+        )
+        .await?)
     }
 }
 
@@ -248,13 +260,14 @@ impl RedisListReceiveProxy {
 
 #[async_trait]
 impl ReceiveProxy for RedisListReceiveProxy {
-    async fn recv(&self) -> Result<Message> {
+    async fn recv(&self, source: u32) -> Result<Message> {
         let mut con = self.redis_pool.get().await?;
         let msg = read_redis(
             &mut con,
             &get_redis_list_key(
                 &self.redis_options.list_key_prefix,
                 &self.burst_options.burst_id,
+                source,
                 self.worker_id,
             ),
         )
@@ -319,6 +332,7 @@ impl BroadcastSendProxy for RedisListBroadcastSendProxy {
 async fn send_direct<C>(
     connection: C,
     msg: Message,
+    source: u32,
     dest: u32,
     redis_options: &RedisListOptions,
     burst_options: &BurstOptions,
@@ -332,6 +346,7 @@ where
         get_redis_list_key(
             &redis_options.list_key_prefix,
             &burst_options.burst_id,
+            source,
             dest,
         ),
     )
@@ -368,10 +383,18 @@ where
     Ok(msg)
 }
 
-fn get_redis_list_key(prefix: &str, burst_id: &str, worker_id: u32) -> String {
-    format!("{}:{}:worker_{}", prefix, burst_id, worker_id)
+fn get_redis_list_key(
+    prefix: &str,
+    burst_id: &str,
+    worker_source: u32,
+    worker_dest: u32,
+) -> String {
+    format!(
+        "{}:{}:s{}-d{}",
+        prefix, burst_id, worker_source, worker_dest
+    )
 }
 
 fn get_broadcast_list_key(prefix: &str, burst_id: &str, group_id: &str) -> String {
-    format!("{}:{}:group_{}", prefix, burst_id, group_id)
+    format!("{}:{}:g{}", prefix, burst_id, group_id)
 }

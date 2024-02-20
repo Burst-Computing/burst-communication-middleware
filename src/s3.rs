@@ -198,8 +198,8 @@ impl SendProxy for S3Proxy {
 
 #[async_trait]
 impl ReceiveProxy for S3Proxy {
-    async fn recv(&self) -> Result<Message> {
-        self.receiver.recv().await
+    async fn recv(&self, source: u32) -> Result<Message> {
+        self.receiver.recv(source).await
     }
 }
 
@@ -296,7 +296,7 @@ impl S3ReceiveProxy {
 
 #[async_trait]
 impl ReceiveProxy for S3ReceiveProxy {
-    async fn recv(&self) -> Result<Message> {
+    async fn recv(&self, _source: u32) -> Result<Message> {
         let permit = self.client_semaphore.acquire().await;
         if permit.is_err() {
             return Err("Failed to acquire semaphore permit".into());
