@@ -10,8 +10,8 @@ use redis::{
 // use redis::Client;
 
 use crate::{
-    impl_chainable_setter, BroadcastProxy, BroadcastSendProxy, BurstOptions, CollectiveType,
-    Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
+    Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
 };
 
 #[derive(Clone, Debug)]
@@ -55,88 +55,91 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         redis_options: RedisListOptions,
-    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>> {
-        Err("Not implemented".into())
-        // let redis_options = Arc::new(redis_options);
+        broadcast_proxy: Box<dyn BroadcastSendProxy>,
+    ) -> Result<(
+        HashMap<u32, Box<dyn SendReceiveProxy>>,
+        Box<dyn BroadcastSendProxy>,
+    )> {
+        let redis_options = Arc::new(redis_options);
 
-        // // create redis pool with deadpool
-        // let group_size = burst_options
-        //     .group_ranges
-        //     .get(&burst_options.group_id)
-        //     .unwrap()
-        //     .len();
-        // let pool = Config::from_url(redis_options.redis_uri.clone())
-        //     .builder()
-        //     .unwrap()
-        //     .max_size(group_size as usize)
-        //     .runtime(Runtime::Tokio1)
-        //     .build()
-        //     .unwrap();
-        // // let pool = conf.create_pool(Some(Runtime::Tokio1)).unwrap();
+        // create redis pool with deadpool
+        let group_size = burst_options
+            .group_ranges
+            .get(&burst_options.group_id)
+            .unwrap()
+            .len();
+        let pool = Config::from_url(redis_options.redis_uri.clone())
+            .builder()
+            .unwrap()
+            .max_size(group_size as usize)
+            .runtime(Runtime::Tokio1)
+            .build()
+            .unwrap();
+        // let pool = conf.create_pool(Some(Runtime::Tokio1)).unwrap();
 
-        // // spawn task to receive broadcast messages and send them to the broadcast proxy
-        // let broascast_client = Client::open(redis_options.redis_uri.clone())?;
-        // let mut broadcast_connection = broascast_client.get_async_connection().await?;
-        // let broadcast_list = get_broadcast_list_key(
-        //     &redis_options.broadcast_topic_prefix,
-        //     &burst_options.burst_id,
-        //     &burst_options.group_id,
-        // );
-        // tokio::spawn(async move {
-        //     log::debug!("starting broadcast receiver");
-        //     loop {
-        //         // wait for the next message containing the broadcast key
-        //         // log::debug!("waiting for broadcast message");
-        //         let (_, bcast_key): (String, String) = broadcast_connection
-        //             .blpop(&broadcast_list, 0.0)
-        //             .await
-        //             .unwrap();
-        //         // log::debug!("received broadcast message with key {:?}", bcast_key);
+        // spawn task to receive broadcast messages and send them to the broadcast proxy
+        let broascast_client = Client::open(redis_options.redis_uri.clone())?;
+        let mut broadcast_connection = broascast_client.get_async_connection().await?;
+        let broadcast_list = get_broadcast_list_key(
+            &redis_options.broadcast_topic_prefix,
+            &burst_options.burst_id,
+            &burst_options.group_id,
+        );
+        tokio::spawn(async move {
+            log::debug!("starting broadcast receiver");
+            loop {
+                // wait for the next message containing the broadcast key
+                // log::debug!("waiting for broadcast message");
+                let (_, bcast_key): (String, String) = broadcast_connection
+                    .blpop(&broadcast_list, 0.0)
+                    .await
+                    .unwrap();
+                // log::debug!("received broadcast message with key {:?}", bcast_key);
 
-        //         // get the message from redis using GET and send it to the broadcast proxy
-        //         let header: Vec<u8> = broadcast_connection
-        //             .get(format!("{}-header", bcast_key))
-        //             .await
-        //             .unwrap();
-        //         let payload: Vec<u8> = broadcast_connection
-        //             .get(format!("{}-payload", bcast_key))
-        //             .await
-        //             .unwrap();
-        //         let msg = Message::from((header, payload));
-        //         broadcast_proxy.broadcast_send(msg).await.unwrap();
-        //     }
-        // });
+                // get the message from redis using GET and send it to the broadcast proxy
+                let header: Vec<u8> = broadcast_connection
+                    .get(format!("{}-header", bcast_key))
+                    .await
+                    .unwrap();
+                let payload: Vec<u8> = broadcast_connection
+                    .get(format!("{}-payload", bcast_key))
+                    .await
+                    .unwrap();
+                let msg = Message::from((header, payload));
+                broadcast_proxy.broadcast_send(msg).await.unwrap();
+            }
+        });
 
-        // let current_group = burst_options
-        //     .group_ranges
-        //     .get(&burst_options.group_id)
-        //     .unwrap();
+        let current_group = burst_options
+            .group_ranges
+            .get(&burst_options.group_id)
+            .unwrap();
 
-        // let mut hmap = HashMap::new();
+        let mut hmap = HashMap::new();
 
-        // futures::future::try_join_all(current_group.iter().map(|worker_id| {
-        //     let p = pool.clone();
-        //     let r = redis_options.clone();
-        //     let b = burst_options.clone();
-        //     async move { RedisListProxy::new(p, r, b, *worker_id).await }
-        // }))
-        // .await?
-        // .into_iter()
-        // .for_each(|proxy| {
-        //     hmap.insert(
-        //         proxy.worker_id,
-        //         Box::new(proxy) as Box<dyn SendReceiveProxy>,
-        //     );
-        // });
+        futures::future::try_join_all(current_group.iter().map(|worker_id| {
+            let p = pool.clone();
+            let r = redis_options.clone();
+            let b = burst_options.clone();
+            async move { RedisListProxy::new(p, r, b, *worker_id).await }
+        }))
+        .await?
+        .into_iter()
+        .for_each(|proxy| {
+            hmap.insert(
+                proxy.worker_id,
+                Box::new(proxy) as Box<dyn SendReceiveProxy>,
+            );
+        });
 
-        // Ok((
-        //     hmap,
-        //     Box::new(RedisListBroadcastSendProxy::new(
-        //         broascast_client.get_multiplexed_async_connection().await?,
-        //         redis_options,
-        //         burst_options,
-        //     )) as Box<dyn BroadcastSendProxy>,
-        // ))
+        Ok((
+            hmap,
+            Box::new(RedisListBroadcastSendProxy::new(
+                broascast_client.get_multiplexed_async_connection().await?,
+                redis_options,
+                burst_options,
+            )) as Box<dyn BroadcastSendProxy>,
+        ))
     }
 }
 
@@ -150,6 +153,7 @@ pub struct RedisListSendProxy {
     redis_pool: Pool,
     redis_options: Arc<RedisListOptions>,
     burst_options: Arc<BurstOptions>,
+    worker_id: u32,
 }
 
 pub struct RedisListReceiveProxy {
@@ -176,8 +180,8 @@ impl SendProxy for RedisListProxy {
 
 #[async_trait]
 impl ReceiveProxy for RedisListProxy {
-    async fn recv(&self) -> Result<Message> {
-        self.receiver.recv().await
+    async fn recv(&self, source: u32) -> Result<Message> {
+        self.receiver.recv(source).await
     }
 }
 
@@ -194,6 +198,7 @@ impl RedisListProxy {
                 redis_pool.clone(),
                 redis_options.clone(),
                 burst_options.clone(),
+                worker_id,
             )),
             receiver: Box::new(RedisListReceiveProxy::new(
                 redis_pool.clone(),
@@ -210,11 +215,13 @@ impl RedisListSendProxy {
         redis_pool: Pool,
         redis_options: Arc<RedisListOptions>,
         burst_options: Arc<BurstOptions>,
+        worker_id: u32,
     ) -> Self {
         Self {
             redis_pool,
             redis_options,
             burst_options,
+            worker_id,
         }
     }
 }
@@ -223,7 +230,15 @@ impl RedisListSendProxy {
 impl SendProxy for RedisListSendProxy {
     async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         let con = self.redis_pool.get().await?;
-        Ok(send_direct(con, msg, dest, &self.redis_options, &self.burst_options).await?)
+        Ok(send_direct(
+            con,
+            msg,
+            self.worker_id,
+            dest,
+            &self.redis_options,
+            &self.burst_options,
+        )
+        .await?)
     }
 }
 
@@ -245,13 +260,14 @@ impl RedisListReceiveProxy {
 
 #[async_trait]
 impl ReceiveProxy for RedisListReceiveProxy {
-    async fn recv(&self) -> Result<Message> {
+    async fn recv(&self, source: u32) -> Result<Message> {
         let mut con = self.redis_pool.get().await?;
         let msg = read_redis(
             &mut con,
             &get_redis_list_key(
                 &self.redis_options.list_key_prefix,
                 &self.burst_options.burst_id,
+                source,
                 self.worker_id,
             ),
         )
@@ -316,6 +332,7 @@ impl BroadcastSendProxy for RedisListBroadcastSendProxy {
 async fn send_direct<C>(
     connection: C,
     msg: Message,
+    source: u32,
     dest: u32,
     redis_options: &RedisListOptions,
     burst_options: &BurstOptions,
@@ -329,6 +346,7 @@ where
         get_redis_list_key(
             &redis_options.list_key_prefix,
             &burst_options.burst_id,
+            source,
             dest,
         ),
     )
@@ -365,10 +383,18 @@ where
     Ok(msg)
 }
 
-fn get_redis_list_key(prefix: &str, burst_id: &str, worker_id: u32) -> String {
-    format!("{}:{}:worker_{}", prefix, burst_id, worker_id)
+fn get_redis_list_key(
+    prefix: &str,
+    burst_id: &str,
+    worker_source: u32,
+    worker_dest: u32,
+) -> String {
+    format!(
+        "{}:{}:s{}-d{}",
+        prefix, burst_id, worker_source, worker_dest
+    )
 }
 
 fn get_broadcast_list_key(prefix: &str, burst_id: &str, group_id: &str) -> String {
-    format!("{}:{}:group_{}", prefix, burst_id, group_id)
+    format!("{}:{}:g{}", prefix, burst_id, group_id)
 }

@@ -1,17 +1,17 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use deadpool_redis::{Config, Pool, Runtime};
 use redis::{
     aio::{ConnectionLike, MultiplexedConnection},
     streams::{StreamReadOptions, StreamReadReply},
     AsyncCommands, Client,
 };
-use tokio::sync::Mutex;
 
 use crate::{
-    impl_chainable_setter, BroadcastProxy, BroadcastSendProxy, BurstOptions, CollectiveType,
-    Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
+    Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
 };
 
 #[derive(Clone, Debug)]
@@ -55,61 +55,64 @@ impl SendReceiveFactory<RedisStreamOptions> for RedisStreamImpl {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         redis_options: RedisStreamOptions,
-    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>> {
-        Err("Not implemented".into())
-        // let redis_options = Arc::new(redis_options);
-        // // create redis pool with deadpool
-        // let group_size = burst_options
-        //     .group_ranges
-        //     .get(&burst_options.group_id)
-        //     .unwrap()
-        //     .len();
-        // let pool = Config::from_url(redis_options.redis_uri.clone())
-        //     .builder()
-        //     .unwrap()
-        //     .max_size(group_size as usize)
-        //     .runtime(Runtime::Tokio1)
-        //     .build()
-        //     .unwrap();
+        broadcast_proxy: Box<dyn BroadcastSendProxy>,
+    ) -> Result<(
+        HashMap<u32, Box<dyn SendReceiveProxy>>,
+        Box<dyn BroadcastSendProxy>,
+    )> {
+        let redis_options = Arc::new(redis_options);
+        // create redis pool with deadpool
+        let group_size = burst_options
+            .group_ranges
+            .get(&burst_options.group_id)
+            .unwrap()
+            .len();
+        let pool = Config::from_url(redis_options.redis_uri.clone())
+            .builder()
+            .unwrap()
+            .max_size(group_size as usize)
+            .runtime(Runtime::Tokio1)
+            .build()
+            .unwrap();
 
-        // init_redis(
-        //     burst_options.clone(),
-        //     redis_options.clone(),
-        //     broadcast_proxy,
-        // )
-        // .await?;
+        init_redis(
+            burst_options.clone(),
+            redis_options.clone(),
+            broadcast_proxy,
+        )
+        .await?;
 
-        // let current_group = burst_options
-        //     .group_ranges
-        //     .get(&burst_options.group_id)
-        //     .unwrap();
+        let current_group = burst_options
+            .group_ranges
+            .get(&burst_options.group_id)
+            .unwrap();
 
-        // let mut hmap = HashMap::new();
+        let mut hmap = HashMap::new();
 
-        // futures::future::try_join_all(current_group.iter().map(|worker_id| {
-        //     let p = pool.clone();
-        //     let r = redis_options.clone();
-        //     let b = burst_options.clone();
-        //     async move { RedisStreamProxy::new(p, r, b, *worker_id).await }
-        // }))
-        // .await?
-        // .into_iter()
-        // .for_each(|proxy| {
-        //     hmap.insert(
-        //         proxy.worker_id,
-        //         Box::new(proxy) as Box<dyn SendReceiveProxy>,
-        //     );
-        // });
+        futures::future::try_join_all(current_group.iter().map(|worker_id| {
+            let p = pool.clone();
+            let r = redis_options.clone();
+            let b = burst_options.clone();
+            async move { RedisStreamProxy::new(p, r, b, *worker_id).await }
+        }))
+        .await?
+        .into_iter()
+        .for_each(|proxy| {
+            hmap.insert(
+                proxy.worker_id,
+                Box::new(proxy) as Box<dyn SendReceiveProxy>,
+            );
+        });
 
-        // let broadcast_client = Client::open(redis_options.redis_uri.clone())?;
-        // Ok((
-        //     hmap,
-        //     Box::new(RedisStreamBroadcastSendProxy::new(
-        //         broadcast_client.get_multiplexed_async_connection().await?,
-        //         redis_options,
-        //         burst_options,
-        //     )) as Box<dyn BroadcastSendProxy>,
-        // ))
+        let broadcast_client = Client::open(redis_options.redis_uri.clone())?;
+        Ok((
+            hmap,
+            Box::new(RedisStreamBroadcastSendProxy::new(
+                broadcast_client.get_multiplexed_async_connection().await?,
+                redis_options,
+                burst_options,
+            )) as Box<dyn BroadcastSendProxy>,
+        ))
     }
 }
 
@@ -152,6 +155,7 @@ pub struct RedisStreamSendProxy {
     redis_pool: Pool,
     redis_options: Arc<RedisStreamOptions>,
     burst_options: Arc<BurstOptions>,
+    worker_id: u32,
 }
 
 pub struct RedisStreamReceiveProxy {
@@ -159,7 +163,7 @@ pub struct RedisStreamReceiveProxy {
     redis_options: Arc<RedisStreamOptions>,
     burst_options: Arc<BurstOptions>,
     worker_id: u32,
-    last_id: Mutex<String>,
+    stream_ids: DashMap<u32, String>,
 }
 
 pub struct RedisStreamBroadcastSendProxy {
@@ -179,8 +183,8 @@ impl SendProxy for RedisStreamProxy {
 
 #[async_trait]
 impl ReceiveProxy for RedisStreamProxy {
-    async fn recv(&self) -> Result<Message> {
-        self.receiver.recv().await
+    async fn recv(&self, source: u32) -> Result<Message> {
+        self.receiver.recv(source).await
     }
 }
 
@@ -197,6 +201,7 @@ impl RedisStreamProxy {
                 redis_pool.clone(),
                 redis_options.clone(),
                 burst_options.clone(),
+                worker_id,
             )),
             receiver: Box::new(RedisStreamReceiveProxy::new(
                 redis_pool.clone(),
@@ -212,7 +217,15 @@ impl RedisStreamProxy {
 impl SendProxy for RedisStreamSendProxy {
     async fn send(&self, dest: u32, msg: Message) -> Result<()> {
         let con = self.redis_pool.get().await?;
-        Ok(send_direct(con, msg, dest, &self.redis_options, &self.burst_options).await?)
+        Ok(send_direct(
+            con,
+            msg,
+            self.worker_id,
+            dest,
+            &self.redis_options,
+            &self.burst_options,
+        )
+        .await?)
     }
 }
 
@@ -221,34 +234,40 @@ impl RedisStreamSendProxy {
         redis_pool: Pool,
         redis_options: Arc<RedisStreamOptions>,
         burst_options: Arc<BurstOptions>,
+        worker_id: u32,
     ) -> Self {
         Self {
             redis_pool,
             redis_options,
             burst_options,
+            worker_id,
         }
     }
 }
 
 #[async_trait]
 impl ReceiveProxy for RedisStreamReceiveProxy {
-    async fn recv(&self) -> Result<Message> {
-        let mut last_id = self.last_id.lock().await;
+    async fn recv(&self, source: u32) -> Result<Message> {
+        log::debug!("[Redis Stream] Getting message from source {}", source);
+        let last_id = match self.stream_ids.get(&source) {
+            Some(id) => id.value().clone(),
+            None => "0".to_string(),
+        };
+
         let mut con = self.redis_pool.get().await?;
         let (new_last_id, reply) = read_stream(
             &mut con,
             &get_direct_stream_name(
                 &self.redis_options.direct_stream_prefix,
                 &self.burst_options.burst_id,
+                source,
                 self.worker_id,
             ),
             &last_id,
         )
         .await?;
 
-        *last_id = new_last_id;
-        // drop last_id mutex guard early so we don't hold the lock while deserializing the message
-        drop(last_id);
+        self.stream_ids.insert(source, new_last_id);
 
         let msg = deserialize_stream_reply(reply)?;
         // log::debug!("[Redis Stream] Got message {:?}", msg);
@@ -263,12 +282,13 @@ impl RedisStreamReceiveProxy {
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
     ) -> Self {
+        let stream_offsets = DashMap::with_capacity(burst_options.burst_size as usize);
         Self {
             redis_pool,
             redis_options,
             burst_options,
             worker_id,
-            last_id: Mutex::new("0".to_string()),
+            stream_ids: stream_offsets,
         }
     }
 }
@@ -318,6 +338,7 @@ impl BroadcastSendProxy for RedisStreamBroadcastSendProxy {
 async fn send_direct<C>(
     connection: C,
     msg: Message,
+    source: u32,
     dest: u32,
     redis_options: &RedisStreamOptions,
     burst_options: &BurstOptions,
@@ -331,6 +352,7 @@ where
         &get_direct_stream_name(
             &redis_options.direct_stream_prefix,
             &burst_options.burst_id,
+            source,
             dest,
         ),
     )
@@ -363,6 +385,7 @@ async fn send_redis<C>(mut connection: C, msg: &Message, key: &str) -> Result<()
 where
     C: ConnectionLike + Send,
 {
+    log::debug!("[Redis Stream] Adding message to stream {}", key);
     let data: [&[u8]; 2] = msg.into();
     connection
         .xadd(key, "*", &[("h", data[0]), ("p", data[1])])
@@ -378,11 +401,11 @@ async fn read_stream<C>(
 where
     C: ConnectionLike + Send,
 {
-    // log::debug!(
-    //     "[Redis Stream] Reading from stream {} with last_id {}",
-    //     stream,
-    //     last_id
-    // );
+    log::debug!(
+        "[Redis Stream] Reading from stream {} with last_id {}",
+        stream,
+        last_id
+    );
     let reply: StreamReadReply = connection
         .xread_options(
             &[stream],
@@ -394,11 +417,11 @@ where
     let stream_key = reply.keys.iter().next().unwrap();
     let last_id = stream_key.ids.iter().next().unwrap().id.clone();
 
-    // log::debug!(
-    //     "[Redis Stream] Got last_id {} from stream {}",
-    //     last_id,
-    //     stream
-    // );
+    log::debug!(
+        "[Redis Stream] Got last_id {} from stream {}",
+        last_id,
+        stream
+    );
 
     return Ok((last_id, reply));
 }
@@ -425,8 +448,16 @@ fn deserialize_stream_reply(reply: StreamReadReply) -> Result<Message> {
     Ok(Message::from((header, payload)))
 }
 
-fn get_direct_stream_name(prefix: &str, burst_id: &str, worker_id: u32) -> String {
-    format!("{}:{}:worker_{}", prefix, burst_id, worker_id)
+fn get_direct_stream_name(
+    prefix: &str,
+    burst_id: &str,
+    worker_source: u32,
+    worker_dest: u32,
+) -> String {
+    format!(
+        "{}:{}:s{}-d{}",
+        prefix, burst_id, worker_source, worker_dest
+    )
 }
 
 fn get_broadcast_stream_name(prefix: &str, burst_id: &str, group_id: &str) -> String {
