@@ -180,8 +180,8 @@ impl SendProxy for StreamServerProxy {
 
 #[async_trait]
 impl ReceiveProxy for StreamServerProxy {
-    async fn recv(&self) -> Result<Message> {
-        self.receiver.recv().await
+    async fn recv(&self, source: u32) -> Result<Message> {
+        self.receiver.recv(source).await
     }
 }
 
@@ -234,7 +234,7 @@ impl StreamServerSendProxy {
 
 #[async_trait]
 impl ReceiveProxy for StreamServerReceiveProxy {
-    async fn recv(&self) -> Result<Message> {
+    async fn recv(&self, _source: u32) -> Result<Message> {
         let mut client = Client::new(self.connection_pool.clone());
         let data = client.recv(self.worker_id).await;
 
