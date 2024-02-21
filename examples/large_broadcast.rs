@@ -113,14 +113,14 @@ fn worker(burst_middleware: MiddlewareActorHandle) {
             burst_middleware.info.worker_id,
             payload.len()
         );
-        burst_middleware.broadcast(Some(payload)).unwrap()
+        burst_middleware.broadcast(Some(payload), 0).unwrap()
     } else {
         log::info!(
             "worker {} (group {}) => waiting for broadcast",
             burst_middleware.info.worker_id,
             burst_middleware.info.group_id
         );
-        burst_middleware.broadcast(None).unwrap()
+        burst_middleware.broadcast(None, 0).unwrap()
     };
     log::info!(
         "worker {} (group {}) => received broadcast message with size {}",

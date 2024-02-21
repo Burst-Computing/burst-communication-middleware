@@ -46,10 +46,7 @@ pub trait SendReceiveFactory<T>: Send + Sync {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         options: T,
-    ) -> Result<(
-        HashMap<u32, Box<dyn SendReceiveProxy>>,
-        Arc<dyn BroadcastProxy>,
-    )>;
+    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>>;
 }
 
 #[async_trait]
@@ -57,10 +54,7 @@ pub trait SendReceiveLocalFactory<T>: Send + Sync {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         options: T,
-    ) -> Result<(
-        HashMap<u32, Box<dyn SendReceiveProxy>>,
-        Arc<dyn BroadcastProxy>,
-    )>;
+    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>>;
 }
 
 #[derive(Clone, Debug)]
@@ -148,22 +142,22 @@ impl BurstMiddleware {
         let options = Arc::new(options);
         let current_group = options.group_ranges.get(&options.group_id).unwrap();
 
-        let (mut local_proxies, local_broadcast_proxy) =
+        let mut local_proxies =
             LocalImpl::create_proxies(options.clone(), local_impl_options).await?;
-        let (mut remote_proxies, remote_broadcast_proxy) =
+        let mut remote_proxies =
             RemoteImpl::create_proxies(options.clone(), remote_impl_options).await?;
 
         let mut proxies = HashMap::new();
 
         for id in current_group {
-            let local_proxy = local_proxies.remove(id).unwrap();
-            let remote_proxy = remote_proxies.remove(id).unwrap();
+            let (local_direct_proxy, local_broadcast_proxy) = local_proxies.remove(id).unwrap();
+            let (remote_direct_proxy, remote_broadcast_proxy) = remote_proxies.remove(id).unwrap();
             let proxy = BurstMiddleware::new(
                 options.clone(),
-                local_proxy.into(),
-                remote_proxy.into(),
-                local_broadcast_proxy.clone(),
-                remote_broadcast_proxy.clone(),
+                local_direct_proxy,
+                remote_direct_proxy,
+                local_broadcast_proxy,
+                remote_broadcast_proxy,
                 *id,
                 current_group.clone(),
             );
@@ -177,8 +171,8 @@ impl BurstMiddleware {
         options: Arc<BurstOptions>,
         local_send_receive: Box<dyn SendReceiveProxy>,
         remote_send_receive: Box<dyn SendReceiveProxy>,
-        local_broadcast: Arc<dyn BroadcastProxy>,
-        remote_broadcast: Arc<dyn BroadcastProxy>,
+        local_broadcast: Box<dyn BroadcastProxy>,
+        remote_broadcast: Box<dyn BroadcastProxy>,
         worker_id: u32,
         group: HashSet<u32>,
     ) -> Self {
@@ -196,14 +190,11 @@ impl BurstMiddleware {
         .map(|c| (c, 0))
         .collect();
 
-        let send_counters: HashMap<u32, u32> = (0..options.burst_size)
-            .into_iter()
-            .map(|id| (id, 0))
-            .collect();
+        let send_counters: HashMap<u32, u32> = (0..options.burst_size).map(|id| (id, 0)).collect();
         let receive_counters = send_counters.clone();
 
         let message_store = MessageStoreChunked::new(
-            (0..options.burst_size).into_iter(),
+            0..options.burst_size,
             &[
                 CollectiveType::Direct,
                 CollectiveType::Broadcast,
@@ -223,8 +214,8 @@ impl BurstMiddleware {
             group_worker_leader,
             local_send_receive: local_send_receive.into(),
             remote_send_receive: remote_send_receive.into(),
-            local_broadcast,
-            remote_broadcast,
+            local_broadcast: local_broadcast.into(),
+            remote_broadcast: remote_broadcast.into(),
             collective_counters: counters,
             send_counters,
             receive_counters,
@@ -259,7 +250,7 @@ impl BurstMiddleware {
         return Ok(msg);
     }
 
-    pub async fn broadcast(&mut self, root: u32, data: Option<Bytes>) -> Result<Message> {
+    pub async fn broadcast(&mut self, data: Option<Bytes>, root: u32) -> Result<Message> {
         let counter = Self::get_counter(&self.collective_counters, &CollectiveType::Broadcast)?;
 
         if self.worker_id == root {

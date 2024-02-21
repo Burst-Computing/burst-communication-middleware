@@ -81,10 +81,7 @@ impl SendReceiveFactory<S3Options> for S3Impl {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         s3_options: S3Options,
-    ) -> Result<(
-        HashMap<u32, Box<dyn SendReceiveProxy>>,
-        Arc<dyn BroadcastProxy>,
-    )> {
+    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>> {
         Err("Not implemented".into())
         // let credentials_provider = Credentials::from_keys(
         //     s3_options.access_key_id.clone(),

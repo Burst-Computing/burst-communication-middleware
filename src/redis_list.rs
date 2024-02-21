@@ -55,10 +55,7 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         redis_options: RedisListOptions,
-    ) -> Result<(
-        HashMap<u32, Box<dyn SendReceiveProxy>>,
-        Arc<dyn BroadcastProxy>,
-    )> {
+    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>> {
         Err("Not implemented".into())
         // let redis_options = Arc::new(redis_options);
 

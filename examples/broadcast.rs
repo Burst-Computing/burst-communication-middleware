@@ -10,8 +10,8 @@ use std::{
     env, thread,
 };
 
-const BURST_SIZE: u32 = 64;
-const GROUPS: u32 = 4;
+const BURST_SIZE: u32 = 4;
+const GROUPS: u32 = 2;
 
 fn main() {
     env_logger::init();
@@ -41,8 +41,7 @@ fn main() {
         let burst_options =
             BurstOptions::new(BURST_SIZE, group_ranges.clone(), group_id.to_string())
                 .burst_id("broadcast".to_string())
-                .enable_message_chunking(true)
-                .message_chunk_size(4 * 1024 * 1024)
+                .enable_message_chunking(false)
                 .build();
 
         let channel_options = TokioChannelOptions::new()
@@ -112,19 +111,19 @@ fn worker(burst_middleware: MiddlewareActorHandle) {
             burst_middleware.info.worker_id,
             data
         );
-        res = burst_middleware.broadcast(Some(data)).unwrap();
+        res = burst_middleware.broadcast(Some(data), 0).unwrap();
     } else {
         log::info!(
             "worker {} (group {}) => waiting for broadcast",
             burst_middleware.info.worker_id,
             burst_middleware.info.group_id
         );
-        res = burst_middleware.broadcast(None).unwrap();
-        log::info!(
-            "worker {} (group {}) => received broadcast data: {:?}",
-            burst_middleware.info.worker_id,
-            burst_middleware.info.group_id,
-            res
-        );
+        res = burst_middleware.broadcast(None, 0).unwrap();
     }
+    log::info!(
+        "worker {} (group {}) => received broadcast data: {:?}",
+        burst_middleware.info.worker_id,
+        burst_middleware.info.group_id,
+        res
+    );
 }
