@@ -135,120 +135,6 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
     }
 }
 
-async fn init_rabbit(
-    pool: Pool,
-    burst_options: Arc<BurstOptions>,
-    rabbitmq_options: Arc<RabbitMQOptions>,
-) -> Result<()> {
-    let connection = pool.get().await?;
-    let channel = connection.create_channel().await?;
-
-    // Declare direct exchange
-    let direct_exchange = get_direct_exchange_name(
-        &rabbitmq_options.direct_exchange_prefix,
-        &burst_options.burst_id,
-    );
-
-    let mut options = ExchangeDeclareOptions::default();
-    options.durable = rabbitmq_options.durable_exchanges;
-
-    channel
-        .exchange_declare(
-            &direct_exchange,
-            ExchangeKind::Direct,
-            options,
-            FieldTable::default(),
-        )
-        .await?;
-
-    // Declare broadcast exchange of type topic
-    let mut options = ExchangeDeclareOptions::default();
-    options.durable = rabbitmq_options.durable_exchanges;
-
-    channel
-        .exchange_declare(
-            get_broadcast_exchange_name(
-                &rabbitmq_options.broadcast_exchange_prefix,
-                &burst_options.burst_id,
-            )
-            .leak(),
-            ExchangeKind::Topic,
-            options,
-            FieldTable::default(),
-        )
-        .await?;
-
-    // Declare all queues and bind them to the direct exchange
-    let mut options = QueueDeclareOptions::default();
-    options.durable = rabbitmq_options.durable_queues;
-
-    let ch = Arc::new(channel.clone());
-    let exchange = Arc::new(direct_exchange);
-    let boptions = burst_options.clone();
-    let roptions = rabbitmq_options.clone();
-
-    futures::future::try_join_all(burst_options.group_ranges.iter().map(
-        |(group_id, worker_ids)| {
-            let ch = ch.clone();
-            let exchange = exchange.clone();
-            let boptions = boptions.clone();
-            let roptions = roptions.clone();
-            async move {
-                // Declare group broadcast queue
-                let queue_name = get_broadcast_queue_name(
-                    &roptions.broadcast_queue_prefix,
-                    &boptions.burst_id,
-                    group_id,
-                );
-                let q = ch
-                    .queue_declare(queue_name.leak(), options, FieldTable::default())
-                    .await?;
-                // Bind queue to broadcast exchange
-                ch.queue_bind(
-                    q.name().as_str(),
-                    &get_broadcast_exchange_name(
-                        &roptions.broadcast_exchange_prefix,
-                        &boptions.burst_id,
-                    ),
-                    &get_broadcast_subscribe_routing_key(group_id),
-                    QueueBindOptions::default(),
-                    FieldTable::default(),
-                )
-                .await?;
-                // Declare worker queues
-                futures::future::try_join_all(worker_ids.iter().map(|id| {
-                    let ch = ch.clone();
-                    let exchange = exchange.clone();
-                    let boptions = boptions.clone();
-                    let roptions = roptions.clone();
-                    let queue_name =
-                        get_queue_name(&roptions.queue_prefix, &boptions.burst_id, *id);
-                    async move {
-                        let q = ch
-                            .queue_declare(&queue_name, options, FieldTable::default())
-                            .await?;
-                        // Bind queue to direct exchange
-                        ch.queue_bind(
-                            q.name().as_str(),
-                            &exchange,
-                            q.name().as_str(),
-                            QueueBindOptions::default(),
-                            FieldTable::default(),
-                        )
-                        .await?;
-                        Ok::<_, lapin::Error>(())
-                    }
-                }))
-                .await?;
-                Ok::<_, lapin::Error>(())
-            }
-        },
-    ))
-    .await?;
-
-    Ok(())
-}
-
 // DIRECT PROXIES
 
 pub struct RabbitMQProxy {
@@ -524,6 +410,120 @@ impl RabbitMQBroadcastReceiveProxy {
 }
 
 // Helper Functions
+
+async fn init_rabbit(
+    pool: Pool,
+    burst_options: Arc<BurstOptions>,
+    rabbitmq_options: Arc<RabbitMQOptions>,
+) -> Result<()> {
+    let connection = pool.get().await?;
+    let channel = connection.create_channel().await?;
+
+    // Declare direct exchange
+    let direct_exchange = get_direct_exchange_name(
+        &rabbitmq_options.direct_exchange_prefix,
+        &burst_options.burst_id,
+    );
+
+    let mut options = ExchangeDeclareOptions::default();
+    options.durable = rabbitmq_options.durable_exchanges;
+
+    channel
+        .exchange_declare(
+            &direct_exchange,
+            ExchangeKind::Direct,
+            options,
+            FieldTable::default(),
+        )
+        .await?;
+
+    // Declare broadcast exchange of type topic
+    let mut options = ExchangeDeclareOptions::default();
+    options.durable = rabbitmq_options.durable_exchanges;
+
+    channel
+        .exchange_declare(
+            get_broadcast_exchange_name(
+                &rabbitmq_options.broadcast_exchange_prefix,
+                &burst_options.burst_id,
+            )
+            .leak(),
+            ExchangeKind::Topic,
+            options,
+            FieldTable::default(),
+        )
+        .await?;
+
+    // Declare all queues and bind them to the direct exchange
+    let mut options = QueueDeclareOptions::default();
+    options.durable = rabbitmq_options.durable_queues;
+
+    let ch = Arc::new(channel.clone());
+    let exchange = Arc::new(direct_exchange);
+    let boptions = burst_options.clone();
+    let roptions = rabbitmq_options.clone();
+
+    futures::future::try_join_all(burst_options.group_ranges.iter().map(
+        |(group_id, worker_ids)| {
+            let ch = ch.clone();
+            let exchange = exchange.clone();
+            let boptions = boptions.clone();
+            let roptions = roptions.clone();
+            async move {
+                // Declare group broadcast queue
+                let queue_name = get_broadcast_queue_name(
+                    &roptions.broadcast_queue_prefix,
+                    &boptions.burst_id,
+                    group_id,
+                );
+                let q = ch
+                    .queue_declare(queue_name.leak(), options, FieldTable::default())
+                    .await?;
+                // Bind queue to broadcast exchange
+                ch.queue_bind(
+                    q.name().as_str(),
+                    &get_broadcast_exchange_name(
+                        &roptions.broadcast_exchange_prefix,
+                        &boptions.burst_id,
+                    ),
+                    &get_broadcast_subscribe_routing_key(group_id),
+                    QueueBindOptions::default(),
+                    FieldTable::default(),
+                )
+                .await?;
+                // Declare worker queues
+                futures::future::try_join_all(worker_ids.iter().map(|id| {
+                    let ch = ch.clone();
+                    let exchange = exchange.clone();
+                    let boptions = boptions.clone();
+                    let roptions = roptions.clone();
+                    let queue_name =
+                        get_queue_name(&roptions.queue_prefix, &boptions.burst_id, *id);
+                    async move {
+                        let q = ch
+                            .queue_declare(&queue_name, options, FieldTable::default())
+                            .await?;
+                        // Bind queue to direct exchange
+                        ch.queue_bind(
+                            q.name().as_str(),
+                            &exchange,
+                            q.name().as_str(),
+                            QueueBindOptions::default(),
+                            FieldTable::default(),
+                        )
+                        .await?;
+                        Ok::<_, lapin::Error>(())
+                    }
+                }))
+                .await?;
+                Ok::<_, lapin::Error>(())
+            }
+        },
+    ))
+    .await?;
+
+    Ok(())
+}
 
 async fn send_direct(
     pool: &Pool,
