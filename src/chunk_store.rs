@@ -108,6 +108,70 @@ impl ChunkedMessageBody for VecChunkedMessageBody {
     }
 }
 
+pub struct BytesMutChunkedMessageBody {
+    chunked_buffs: Vec<BytesMut>,
+    buff: BytesMut,
+    bytes_written: usize,
+    num_chunks: u32,
+    num_chunks_stored: u32,
+}
+
+impl BytesMutChunkedMessageBody {
+    pub fn new(num_chunks: u32, chunk_size: usize) -> Self {
+        println!("num_chunks: {}", num_chunks);
+        println!("chunk_size: {}", chunk_size);
+        let buff_size = (num_chunks as usize) * chunk_size;
+        let mut buff = BytesMut::with_capacity(buff_size);
+        unsafe {
+            buff.set_len(buff_size);
+        }
+        println!("buff_size: {}", buff.len());
+        let chunked_buffs: Vec<_> = (0..num_chunks).map(|_| buff.split_to(chunk_size)).collect();
+        Self {
+            chunked_buffs,
+            buff,
+            bytes_written: 0,
+            num_chunks,
+            num_chunks_stored: 0,
+        }
+    }
+}
+
+impl ChunkedMessageBody for BytesMutChunkedMessageBody {
+    fn insert(&mut self, chunk_id: u32, chunk: Bytes) {
+        log::debug!("Inserting chunk {} of {}", chunk_id, self.num_chunks);
+
+        self.bytes_written += chunk.len();
+        let chunk_buff = &mut self.chunked_buffs[chunk_id as usize];
+        chunk_buff.copy_from_slice(chunk.as_ref());
+
+        self.num_chunks_stored += 1;
+        log::debug!(
+            "Received {} of {} chunks",
+            self.num_chunks_stored,
+            self.num_chunks
+        );
+    }
+
+    fn is_complete(&self) -> bool {
+        self.num_chunks_stored == self.num_chunks
+    }
+
+    fn get_complete_body(mut self) -> Bytes {
+        assert!(self.is_complete(), "Message is not complete");
+
+        for chunk in self.chunked_buffs.into_iter() {
+            self.buff.unsplit(chunk);
+        }
+        self.buff.truncate(self.bytes_written);
+        self.buff.freeze()
+    }
+
+    fn get_num_chunks_stored(&self) -> u32 {
+        self.num_chunks_stored
+    }
+}
+
 /// Splits a message into multiple smaller messages (chunks) based on the maximum chunk size.
 ///
 /// # Arguments

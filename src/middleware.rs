@@ -199,22 +199,10 @@ impl BurstMiddleware {
         .map(|c| (c, 0))
         .collect();
 
-        let send_counters: HashMap<u32, u32> = (0..options.burst_size)
-            .into_iter()
-            .map(|id| (id, 0))
-            .collect();
+        let send_counters: HashMap<u32, u32> = (0..options.burst_size).map(|id| (id, 0)).collect();
         let receive_counters = send_counters.clone();
 
-        let message_store = MessageStoreChunked::new(
-            (0..options.burst_size).into_iter(),
-            &[
-                CollectiveType::Direct,
-                CollectiveType::Broadcast,
-                CollectiveType::Scatter,
-                CollectiveType::Gather,
-                CollectiveType::AllToAll,
-            ],
-        );
+        let message_store = MessageStoreChunked::new(options.message_chunk_size);
 
         Self {
             options,
