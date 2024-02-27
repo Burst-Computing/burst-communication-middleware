@@ -1,14 +1,15 @@
-use std::collections::HashMap;
-
 use crate::{
-    chunk_store::{ChunkedMessageBody, VecChunkedMessageBody},
+    chunk_store::{BytesMutChunkedMessageBody, ChunkedMessageBody},
     types::{CollectiveType, Message},
 };
+use std::collections::hash_map;
+use std::collections::HashMap;
 
 type WorkerCollectiveCounter = (u32, CollectiveType, u32);
 
 pub struct MessageStoreChunked {
-    messages: HashMap<WorkerCollectiveCounter, VecChunkedMessageBody>,
+    messages: HashMap<WorkerCollectiveCounter, BytesMutChunkedMessageBody>,
+    chunk_size: usize,
 }
 
 impl MessageStoreChunked {
@@ -24,9 +25,10 @@ impl MessageStoreChunked {
     /// # Returns
     ///
     /// A new [`MessageStoreChunked`] instance.
-    pub fn new(_ids: impl Iterator<Item = u32>, _collectives: &[CollectiveType]) -> Self {
+    pub fn new(chunk_size: usize) -> Self {
         MessageStoreChunked {
             messages: HashMap::new(),
+            chunk_size,
         }
     }
 
@@ -44,14 +46,13 @@ impl MessageStoreChunked {
     pub fn insert(&mut self, msg: Message) {
         let chunk_id = msg.chunk_id;
 
-        if !self
-            .messages
-            .contains_key(&(msg.sender_id, msg.collective, msg.counter))
-        {
-            let mut message_body = VecChunkedMessageBody::new(msg.num_chunks);
-            message_body.insert(chunk_id, msg.data);
+        if let hash_map::Entry::Vacant(e) =
             self.messages
-                .insert((msg.sender_id, msg.collective, msg.counter), message_body);
+                .entry((msg.sender_id, msg.collective, msg.counter))
+        {
+            let mut message_body = BytesMutChunkedMessageBody::new(msg.num_chunks, self.chunk_size);
+            message_body.insert(chunk_id, msg.data);
+            e.insert(message_body);
         } else {
             let message_body = self
                 .messages
@@ -90,16 +91,16 @@ impl MessageStoreChunked {
         if is_complete {
             let chunk_store = self.messages.remove(&key).unwrap();
             let body = chunk_store.get_complete_body();
-            return Some(Message {
+            Some(Message {
                 sender_id: *sender_id,
                 chunk_id: 0,
                 num_chunks: 1,
                 counter: *counter,
                 collective: *collective,
                 data: body,
-            });
+            })
         } else {
-            return None;
+            None
         }
     }
 
