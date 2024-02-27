@@ -118,14 +118,14 @@ pub struct BytesMutChunkedMessageBody {
 
 impl BytesMutChunkedMessageBody {
     pub fn new(num_chunks: u32, chunk_size: usize) -> Self {
-        println!("num_chunks: {}", num_chunks);
-        println!("chunk_size: {}", chunk_size);
+        log::debug!("num_chunks: {}", num_chunks);
+        log::debug!("chunk_size: {}", chunk_size);
         let buff_size = (num_chunks as usize) * chunk_size;
         let mut buff = BytesMut::with_capacity(buff_size);
         unsafe {
             buff.set_len(buff_size);
         }
-        println!("buff_size: {}", buff.len());
+        log::debug!("buff_size: {}", buff.len());
         let chunked_buffs: Vec<_> = (0..num_chunks).map(|_| buff.split_to(chunk_size)).collect();
         Self {
             chunked_buffs,
