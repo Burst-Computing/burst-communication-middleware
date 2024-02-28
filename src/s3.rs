@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use tokio::sync::{mpsc::Permit, Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore};
 
 use async_trait::async_trait;
 

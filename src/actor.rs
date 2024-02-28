@@ -29,10 +29,12 @@ enum ActorMessage {
     },
     Scatter {
         payloads: Option<Vec<Bytes>>,
+        root: u32,
         respond_to: oneshot::Sender<Result<Message>>,
     },
     Gather {
         payload: Bytes,
+        root: u32,
         respond_to: oneshot::Sender<Result<Option<Vec<Message>>>>,
     },
     AllToAll {
@@ -108,9 +110,10 @@ impl MiddlewareActor {
             }
             ActorMessage::Scatter {
                 payloads,
+                root,
                 respond_to,
             } => {
-                let result = self.middleware.scatter(payloads).await;
+                let result = self.middleware.scatter(payloads, root).await;
                 match respond_to.send(result) {
                     Ok(_) => {}
                     Err(_) => {
@@ -123,9 +126,10 @@ impl MiddlewareActor {
             }
             ActorMessage::Gather {
                 payload,
+                root,
                 respond_to,
             } => {
-                let result = self.middleware.gather(payload).await;
+                let result = self.middleware.gather(payload, root).await;
                 match respond_to.send(result) {
                     Ok(_) => {}
                     Err(_) => {
@@ -181,8 +185,7 @@ impl MiddlewareActorHandle {
             respond_to: send,
         })?;
 
-        let result = recv.blocking_recv()?;
-        return result;
+        recv.blocking_recv()?
     }
 
     pub fn recv(&self, from: u32) -> Result<Message> {
@@ -193,8 +196,7 @@ impl MiddlewareActorHandle {
             respond_to: send,
         })?;
 
-        let result = recv.blocking_recv()?;
-        return result;
+        recv.blocking_recv()?
     }
 
     pub fn broadcast(&self, data: Option<Bytes>, root: u32) -> Result<Message> {
@@ -206,32 +208,31 @@ impl MiddlewareActorHandle {
             respond_to: send,
         })?;
 
-        let result = recv.blocking_recv()?;
-        return result;
+        recv.blocking_recv()?
     }
 
-    pub fn gather(&self, data: Bytes) -> Result<Option<Vec<Message>>> {
+    pub fn gather(&self, data: Bytes, root: u32) -> Result<Option<Vec<Message>>> {
         let (send, recv) = oneshot::channel();
 
         self.sender.blocking_send(ActorMessage::Gather {
             payload: data,
+            root,
             respond_to: send,
         })?;
 
-        let result = recv.blocking_recv()?;
-        return result;
+        recv.blocking_recv()?
     }
 
-    pub fn scatter(&self, data: Option<Vec<Bytes>>) -> Result<Message> {
+    pub fn scatter(&self, data: Option<Vec<Bytes>>, root: u32) -> Result<Message> {
         let (send, recv) = oneshot::channel();
 
         self.sender.blocking_send(ActorMessage::Scatter {
             payloads: data,
+            root,
             respond_to: send,
         })?;
 
-        let result = recv.blocking_recv()?;
-        return result;
+        recv.blocking_recv()?
     }
 
     pub fn all_to_all(&self, data: Vec<Bytes>) -> Result<Vec<Message>> {
@@ -242,7 +243,6 @@ impl MiddlewareActorHandle {
             respond_to: send,
         })?;
 
-        let result = recv.blocking_recv()?;
-        return result;
+        recv.blocking_recv()?
     }
 }
