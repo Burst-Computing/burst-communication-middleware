@@ -193,16 +193,7 @@ impl BurstMiddleware {
         let send_counters: HashMap<u32, u32> = (0..options.burst_size).map(|id| (id, 0)).collect();
         let receive_counters = send_counters.clone();
 
-        let message_store = MessageStoreChunked::new(
-            0..options.burst_size,
-            &[
-                CollectiveType::Direct,
-                CollectiveType::Broadcast,
-                CollectiveType::Scatter,
-                CollectiveType::Gather,
-                CollectiveType::AllToAll,
-            ],
-        );
+        let message_store = MessageStoreChunked::new(options.message_chunk_size);
 
         // The worker with the lowest id in the group is the group leader
         let group_worker_leader = *group.iter().min().unwrap();
