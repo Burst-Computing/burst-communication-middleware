@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use bytes::Bytes;
 use deadpool_lapin::{Config, Pool, PoolConfig, Runtime};
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use lapin::{
     message::Delivery,
     options::{
@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     impl_chainable_setter, BroadcastProxy, BroadcastReceiveProxy, BroadcastSendProxy, BurstOptions,
-    CollectiveType, Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
 };
 
 #[derive(Clone, Debug)]
@@ -138,7 +138,6 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
 // DIRECT PROXIES
 
 pub struct RabbitMQProxy {
-    worker_id: u32,
     sender: Box<dyn SendProxy>,
     receiver: Box<dyn ReceiveProxy>,
 }
@@ -178,7 +177,6 @@ impl RabbitMQProxy {
         pool: Pool,
     ) -> Result<Self> {
         Ok(Self {
-            worker_id,
             sender: Box::new(
                 RabbitMQSendProxy::new(
                     rabbitmq_options.clone(),
