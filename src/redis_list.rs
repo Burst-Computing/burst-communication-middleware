@@ -293,33 +293,29 @@ impl BroadcastReceiveProxy for RedisListBroadcastProxy {
 #[async_trait]
 impl BroadcastSendProxy for RedisListBroadcastSendProxy {
     async fn broadcast_send(&self, msg: Message) -> Result<()> {
-        let mut con = self.redis_pool.get().await?;
+        let mut conn = self.redis_pool.get().await?;
 
         let bcast_key = format!(
             "{}:broadcast:{}:{}",
             self.burst_options.burst_id, msg.counter, msg.chunk_id
         );
+        log::debug!("SET {:?} {}:header {}:payload", msg, bcast_key, bcast_key);
         let [header, payload]: [&[u8]; 2] = (&msg).into();
-        log::debug!("sending message: {:?}", payload);
-        con.set(format!("{}:header", bcast_key), header).await?;
-        con.set(format!("{}:payload", bcast_key), payload).await?;
+        conn.set(format!("{}:header", bcast_key), header).await?;
+        conn.set(format!("{}:payload", bcast_key), payload).await?;
 
-        futures::future::try_join_all(
-            self.burst_options
-                .group_ranges
-                .keys()
-                .filter(|dest| **dest != self.burst_options.group_id)
-                .map(|dest| {
-                    get_broadcast_list_key(
-                        &self.redis_options.broadcast_topic_prefix,
-                        &self.burst_options.burst_id,
-                        dest,
-                    )
-                })
-                .map(|key| send_broadcast(&self.redis_pool, key, &bcast_key)),
-        )
-        .await?;
-
+        for dest in self.burst_options.group_ranges.keys() {
+            if *dest == self.burst_options.group_id {
+                continue;
+            }
+            let dest_group_key = get_broadcast_list_key(
+                &self.redis_options.broadcast_topic_prefix,
+                &self.burst_options.burst_id,
+                dest,
+            );
+            log::debug!("RPUSH {} {}", dest_group_key, bcast_key);
+            conn.rpush(dest_group_key, &bcast_key).await?;
+        }
         Ok(())
     }
 }
@@ -350,8 +346,8 @@ impl BroadcastReceiveProxy for RedisListBroadcastReceiveProxy {
         // log::debug!("Received broadcast key: {:?}", &bcast_key);
 
         // get the message header and body from redis using GET
-        let header: Vec<u8> = conn.get(format!("{}-header", bcast_key)).await.unwrap();
-        let payload: Vec<u8> = conn.get(format!("{}-payload", bcast_key)).await.unwrap();
+        let header: Vec<u8> = conn.get(format!("{}:header", bcast_key)).await.unwrap();
+        let payload: Vec<u8> = conn.get(format!("{}:payload", bcast_key)).await.unwrap();
         let msg = Message::from((header, payload));
         Ok(msg)
     }
@@ -399,12 +395,6 @@ where
         ),
     )
     .await
-}
-
-async fn send_broadcast(pool: &Pool, topic: String, key: &String) -> Result<()> {
-    let mut conn = pool.get().await?;
-    conn.rpush(topic, key).await?;
-    Ok(())
 }
 
 async fn send_redis<C>(mut connection: C, msg: &Message, key: String) -> Result<()>
