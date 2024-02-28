@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{mpsc::Permit, Mutex, Semaphore};
 
 use async_trait::async_trait;
 
@@ -12,11 +12,10 @@ use aws_config::Region;
 use aws_credential_types::Credentials;
 
 use aws_sdk_s3::{primitives::ByteStream, Client};
-use bytes::Bytes;
 
 use crate::{
-    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
-    Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BroadcastProxy, BroadcastReceiveProxy, BroadcastSendProxy, BurstOptions,
+    CollectiveType, Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
 };
 
 #[derive(Clone, Debug)]
@@ -29,6 +28,7 @@ pub struct S3Options {
     pub bucket: String,
     pub prefix: String,
     pub wait_time: f64,
+    pub retry: u32,
     pub enable_broadcast: bool,
     pub semaphore_permits: usize,
 }
@@ -49,6 +49,7 @@ impl S3Options {
     impl_chainable_setter!(bucket, String);
     impl_chainable_setter!(prefix, String);
     impl_chainable_setter!(wait_time, f64);
+    impl_chainable_setter!(retry, u32);
     impl_chainable_setter!(enable_broadcast, bool);
     impl_chainable_setter!(semaphore_permits, usize);
 
@@ -68,6 +69,7 @@ impl Default for S3Options {
             bucket: "burst-middleware".into(),
             prefix: "dev".into(),
             wait_time: 0.2,
+            retry: 100,
             enable_broadcast: false,
             semaphore_permits: 1024,
         }
@@ -81,11 +83,7 @@ impl SendReceiveFactory<S3Options> for S3Impl {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         s3_options: S3Options,
-        broadcast_proxy: Box<dyn BroadcastSendProxy>,
-    ) -> Result<(
-        HashMap<u32, Box<dyn SendReceiveProxy>>,
-        Box<dyn BroadcastSendProxy>,
-    )> {
+    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>> {
         let credentials_provider = Credentials::from_keys(
             s3_options.access_key_id.clone(),
             s3_options.secret_access_key.clone(),
@@ -122,37 +120,53 @@ impl SendReceiveFactory<S3Options> for S3Impl {
             .get(&burst_options.group_id)
             .unwrap();
 
-        let mut hmap = HashMap::new();
+        let mut proxies = HashMap::new();
+
+        // Seen and pending keys are shared between all send and receive proxies
+        let direct_keys = Arc::new(Mutex::new(Keys {
+            pending: Vec::new(),
+            seen: HashSet::new(),
+        }));
+        // Same for broadcast proxies
+        let bcast_keys = Arc::new(Mutex::new(Keys {
+            pending: Vec::new(),
+            seen: HashSet::new(),
+        }));
+
+        // Broadcast proxies all share the same client and semaphore
+        // as only one worker will be using the broadcast proxy at a time
+        let bcast_client = Client::from_conf(bcast_config.clone());
+        let bcast_client_semaphore = Arc::new(Semaphore::new(s3_options.semaphore_permits));
 
         for worker_id in current_group {
-            let p = S3Proxy::new(
+            let proxy = S3Proxy::new(
                 Client::from_conf(config.clone()),
                 s3_options.clone(),
                 burst_options.clone(),
                 *worker_id,
+                direct_keys.clone(),
             );
-            hmap.insert(*worker_id, Box::new(p) as Box<dyn SendReceiveProxy>);
-        }
-
-        if s3_options.enable_broadcast {
-            tokio::spawn(broadcast_loop(
-                burst_options.clone(),
+            let broadcast_proxy = S3BroadcastProxy::new(
+                bcast_client.clone(),
+                bcast_client_semaphore.clone(),
                 s3_options.clone(),
-                s3_client,
-                broadcast_proxy,
-            ));
+                burst_options.clone(),
+                bcast_keys.clone(),
+            );
+            proxies.insert(
+                *worker_id,
+                (
+                    Box::new(proxy) as Box<dyn SendReceiveProxy>,
+                    Box::new(broadcast_proxy) as Box<dyn BroadcastProxy>,
+                ),
+            );
         }
 
-        Ok((
-            hmap,
-            Box::new(S3BroadcastSendProxy::new(
-                Client::from_conf(bcast_config),
-                s3_options,
-                burst_options,
-            )),
-        ))
+        Ok(proxies)
     }
 }
+
+// DIRECT PROXIES
 
 pub struct S3Proxy {
     receiver: Box<dyn ReceiveProxy>,
@@ -181,12 +195,6 @@ pub struct S3ReceiveProxy {
     keys: Arc<Mutex<Keys>>,
 }
 
-pub struct S3BroadcastSendProxy {
-    _s3_client: Client,
-    _s3_options: Arc<S3Options>,
-    _burst_options: Arc<BurstOptions>,
-}
-
 impl SendReceiveProxy for S3Proxy {}
 
 #[async_trait]
@@ -209,7 +217,9 @@ impl S3Proxy {
         s3_options: Arc<S3Options>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
+        keys: Arc<Mutex<Keys>>,
     ) -> Self {
+        // Each send-receive proxy pair has its own semaphore and client
         let client_semaphore = Arc::new(Semaphore::new(s3_options.semaphore_permits));
         Self {
             sender: Box::new(S3SendProxy::new(
@@ -225,6 +235,7 @@ impl S3Proxy {
                 s3_options.clone(),
                 burst_options.clone(),
                 worker_id,
+                keys,
             )),
         }
     }
@@ -279,6 +290,7 @@ impl S3ReceiveProxy {
         s3_options: Arc<S3Options>,
         burst_options: Arc<BurstOptions>,
         worker_id: u32,
+        keys: Arc<Mutex<Keys>>,
     ) -> Self {
         Self {
             s3_client,
@@ -286,152 +298,127 @@ impl S3ReceiveProxy {
             s3_options,
             burst_options,
             worker_id,
-            keys: Arc::new(Mutex::new(Keys {
-                pending: Vec::new(),
-                seen: HashSet::new(),
-            })),
+            keys,
         }
     }
 }
 
 #[async_trait]
 impl ReceiveProxy for S3ReceiveProxy {
-    async fn recv(&self, _source: u32) -> Result<Message> {
+    async fn recv(&self, source: u32) -> Result<Message> {
         let permit = self.client_semaphore.acquire().await;
         if permit.is_err() {
             return Err("Failed to acquire semaphore permit".into());
         }
 
-        loop {
-            let key = match get_next_object_key(self).await {
-                Ok(key) => key,
-                Err(err) => {
-                    return Err(err);
-                }
-            };
+        let mut keys = self.keys.lock().await;
+        let prefix = format!(
+            "{}/worker-{}/sender-{}/",
+            self.burst_options.burst_id, self.worker_id, source
+        );
+        let key = match get_next_object_key(
+            &prefix,
+            self.s3_client.clone(),
+            self.s3_options.clone(),
+            &mut keys,
+        )
+        .await
+        {
+            Ok(key) => key,
+            Err(err) => {
+                return Err(err);
+            }
+        };
+        drop(keys);
+        let bucket = self.s3_options.bucket.clone();
+        let msg = match get_object_as_message(&bucket, &key, &self.s3_client).await? {
+            Some(msg) => msg,
+            None => {
+                return Err(format!("Failed to get object {} as message", key).into());
+            }
+        };
 
-            log::debug!("S3 Get object with key {}...", key);
-            let obj = self
-                .s3_client
-                .get_object()
-                .bucket(self.s3_options.bucket.clone())
-                .key(key.clone())
-                .send()
-                .await?;
+        drop(permit);
+        return Ok(msg);
+    }
+}
 
-            let (sender_id, collective_type, counter, chunk_id, num_chunks) = match obj.metadata() {
-                Some(metadata) => {
-                    let sender_id = match metadata.get("sender_id") {
-                        Some(sender_id) => match sender_id.parse::<u32>() {
-                            Ok(sender_id) => sender_id,
-                            Err(err) => {
-                                log::error!("Failed to parse sender_id: {}", err);
-                                continue;
-                            }
-                        },
-                        None => {
-                            log::error!("No sender_id found in metadata for key: {}", key);
-                            continue;
-                        }
-                    };
-                    let collective_type = match metadata.get("collective") {
-                        Some(collective) => match collective.as_str() {
-                            "Direct" => CollectiveType::Direct,
-                            "Broadcast" => CollectiveType::Broadcast,
-                            "Scatter" => CollectiveType::Scatter,
-                            "Gather" => CollectiveType::Gather,
-                            "AllToAll" => CollectiveType::AllToAll,
-                            _ => {
-                                log::error!("Invalid collective type: {}", collective);
-                                continue;
-                            }
-                        },
-                        None => {
-                            log::error!("No collective found in metadata for key: {}", key);
-                            continue;
-                        }
-                    };
-                    let counter = match metadata.get("counter") {
-                        Some(counter) => match counter.parse::<u32>() {
-                            Ok(counter) => counter,
-                            Err(err) => {
-                                log::error!("Failed to parse counter: {}", err);
-                                continue;
-                            }
-                        },
-                        None => {
-                            log::error!("No counter found in metadata for key: {}", key);
-                            continue;
-                        }
-                    };
-                    let chunk_id = match metadata.get("chunk_id") {
-                        Some(chunk_id) => match chunk_id.parse::<u32>() {
-                            Ok(chunk_id) => chunk_id,
-                            Err(err) => {
-                                log::error!("Failed to parse chunk_id: {}", err);
-                                continue;
-                            }
-                        },
-                        None => {
-                            log::error!("No chunk_id found in metadata for key: {}", key);
-                            continue;
-                        }
-                    };
-                    let num_chunks = match metadata.get("num_chunks") {
-                        Some(num_chunks) => match num_chunks.parse::<u32>() {
-                            Ok(num_chunks) => num_chunks,
-                            Err(err) => {
-                                log::error!("Failed to parse num_chunks: {}", err);
-                                continue;
-                            }
-                        },
-                        None => {
-                            log::error!("No num_chunks found in metadata for key: {}", key);
-                            continue;
-                        }
-                    };
-                    (sender_id, collective_type, counter, chunk_id, num_chunks)
-                }
-                None => {
-                    log::error!("No metadata found");
-                    continue;
-                }
-            };
-            let bytes = obj.body.collect().await?.into_bytes();
+// BROADCAST PROXIES
 
-            log::debug!("S3 Got object {} with size {}", key, bytes.len());
+pub struct S3BroadcastProxy {
+    broadcast_sender: Box<dyn BroadcastSendProxy>,
+    broadcast_receiver: Box<dyn BroadcastReceiveProxy>,
+}
 
-            self.s3_client
-                .delete_object()
-                .bucket(self.s3_options.bucket.clone())
-                .key(key)
-                .send()
-                .await?;
+pub struct S3BroadcastSendProxy {
+    s3_client: Client,
+    client_semaphore: Arc<Semaphore>,
+    s3_options: Arc<S3Options>,
+    burst_options: Arc<BurstOptions>,
+}
 
-            let msg = Message {
-                sender_id,
-                chunk_id,
-                num_chunks,
-                counter,
-                collective: collective_type,
-                data: Bytes::from(bytes),
-            };
-            drop(permit);
-            return Ok(msg);
+pub struct S3BroadcastReceiveProxy {
+    s3_client: Client,
+    client_semaphore: Arc<Semaphore>,
+    s3_options: Arc<S3Options>,
+    burst_options: Arc<BurstOptions>,
+    keys: Arc<Mutex<Keys>>,
+}
+
+impl BroadcastProxy for S3BroadcastProxy {}
+
+impl S3BroadcastProxy {
+    pub fn new(
+        s3_client: Client,
+        s3_client_semaphore: Arc<Semaphore>,
+        s3_options: Arc<S3Options>,
+        burst_options: Arc<BurstOptions>,
+        keys: Arc<Mutex<Keys>>,
+    ) -> Self {
+        Self {
+            broadcast_sender: Box::new(S3BroadcastSendProxy::new(
+                s3_client.clone(),
+                s3_client_semaphore.clone(),
+                s3_options.clone(),
+                burst_options.clone(),
+            )),
+            broadcast_receiver: Box::new(S3BroadcastReceiveProxy::new(
+                s3_client.clone(),
+                s3_client_semaphore.clone(),
+                s3_options.clone(),
+                burst_options.clone(),
+                keys,
+            )),
         }
+    }
+}
+
+#[async_trait]
+impl BroadcastSendProxy for S3BroadcastProxy {
+    async fn broadcast_send(&self, msg: Message) -> Result<()> {
+        self.broadcast_sender.broadcast_send(msg).await
+    }
+}
+
+#[async_trait]
+impl BroadcastReceiveProxy for S3BroadcastProxy {
+    async fn broadcast_recv(&self) -> Result<Message> {
+        self.broadcast_receiver.broadcast_recv().await
     }
 }
 
 impl S3BroadcastSendProxy {
     pub fn new(
         s3_client: Client,
+        client_semaphore: Arc<Semaphore>,
         s3_options: Arc<S3Options>,
         burst_options: Arc<BurstOptions>,
     ) -> Self {
         Self {
-            _s3_client: s3_client,
-            _s3_options: s3_options,
-            _burst_options: burst_options,
+            s3_client,
+            client_semaphore,
+            s3_options,
+            burst_options,
         }
     }
 }
@@ -439,19 +426,20 @@ impl S3BroadcastSendProxy {
 #[async_trait]
 impl BroadcastSendProxy for S3BroadcastSendProxy {
     async fn broadcast_send(&self, msg: Message) -> Result<()> {
-        if !self._s3_options.enable_broadcast {
+        if !self.s3_options.enable_broadcast {
             panic!("Broadcast not enabled");
         }
 
         let key = format!(
             "{}/broadcast/sender-{}/counter-{}/part-{}",
-            self._burst_options.burst_id, msg.sender_id, msg.counter, msg.chunk_id
+            self.burst_options.burst_id, msg.sender_id, msg.counter, msg.chunk_id
         );
-        self._s3_client
+        let permit = self.client_semaphore.acquire().await?;
+        self.s3_client
             .put_object()
-            .bucket(self._s3_options.bucket.clone())
-            .key(key)
-            .body(ByteStream::from(msg.data.clone()))
+            .bucket(self.s3_options.bucket.clone())
+            .key(&key)
+            .body(ByteStream::from(msg.data))
             .metadata("sender_id", msg.sender_id.to_string())
             .metadata("collective", msg.collective.to_string())
             .metadata("counter", msg.counter.to_string())
@@ -459,157 +447,202 @@ impl BroadcastSendProxy for S3BroadcastSendProxy {
             .metadata("num_chunks", msg.num_chunks.to_string())
             .send()
             .await?;
+        log::debug!("S3 Put object {}", key);
+        drop(permit);
         Ok(())
     }
 }
 
-async fn broadcast_loop(
-    burst_options: Arc<BurstOptions>,
-    s3_options: Arc<S3Options>,
-    s3_client: Client,
-    broadcast_proxy: Box<dyn BroadcastSendProxy>,
-) {
-    let mut received_messages: HashSet<String> = HashSet::new();
-    loop {
-        log::debug!("Listing broadcast keys...");
-        let list_response = s3_client
-            .list_objects_v2()
-            .bucket(s3_options.bucket.clone())
-            .prefix(format!("{}/broadcast/", burst_options.burst_id))
-            .send()
-            .await
-            .unwrap();
-
-        let keys = list_response
-            .contents
-            .unwrap()
-            .iter()
-            .map(|obj| obj.key.clone().unwrap())
-            .collect::<HashSet<String>>();
-
-        let new_keys: HashSet<String> = keys.difference(&received_messages).cloned().collect();
-
-        if new_keys.is_empty() {
-            log::debug!("No new broadcast keys found, sleeping");
-            tokio::time::sleep(tokio::time::Duration::from_secs_f64(s3_options.wait_time)).await;
-            continue;
-        }
-
-        log::debug!("Found {} new keys for broadcast", new_keys.len());
-
-        for new_key in new_keys {
-            let obj = s3_client
-                .get_object()
-                .bucket(s3_options.bucket.clone())
-                .key(new_key.clone())
-                .send()
-                .await
-                .unwrap();
-
-            let (sender_id, counter, chunk_id, num_chunks) = match obj.metadata() {
-                Some(metadata) => {
-                    let sender_id = match metadata.get("sender_id") {
-                        Some(sender_id) => match sender_id.parse::<u32>() {
-                            Ok(sender_id) => sender_id,
-                            Err(err) => {
-                                log::error!("Failed to parse sender_id: {}", err);
-                                continue;
-                            }
-                        },
-                        None => {
-                            log::error!("No sender_id found in metadata for key: {}", new_key);
-                            continue;
-                        }
-                    };
-                    let counter = match metadata.get("counter") {
-                        Some(counter) => match counter.parse::<u32>() {
-                            Ok(counter) => counter,
-                            Err(err) => {
-                                log::error!("Failed to parse counter: {}", err);
-                                continue;
-                            }
-                        },
-                        None => {
-                            log::error!("No counter found in metadata for key: {}", new_key);
-                            continue;
-                        }
-                    };
-                    let chunk_id = match metadata.get("chunk_id") {
-                        Some(chunk_id) => match chunk_id.parse::<u32>() {
-                            Ok(chunk_id) => chunk_id,
-                            Err(err) => {
-                                log::error!("Failed to parse chunk_id: {}", err);
-                                continue;
-                            }
-                        },
-                        None => {
-                            log::error!("No chunk_id found in metadata for key: {}", new_key);
-                            continue;
-                        }
-                    };
-                    let num_chunks = match metadata.get("num_chunks") {
-                        Some(num_chunks) => match num_chunks.parse::<u32>() {
-                            Ok(num_chunks) => num_chunks,
-                            Err(err) => {
-                                log::error!("Failed to parse num_chunks: {}", err);
-                                continue;
-                            }
-                        },
-                        None => {
-                            log::error!("No num_chunks found in metadata for key: {}", new_key);
-                            continue;
-                        }
-                    };
-                    (sender_id, counter, chunk_id, num_chunks)
-                }
-                None => {
-                    log::error!("No metadata found");
-                    continue;
-                }
-            };
-            let bytes = obj.body.collect().await.unwrap().into_bytes();
-
-            log::debug!(
-                "Got object with key {} from {} with size {}",
-                new_key,
-                sender_id,
-                bytes.len()
-            );
-
-            let msg = Message {
-                sender_id,
-                chunk_id,
-                num_chunks,
-                counter,
-                collective: CollectiveType::Broadcast,
-                data: Bytes::from(bytes),
-            };
-            broadcast_proxy.broadcast_send(msg).await.unwrap();
-            received_messages.insert(new_key);
+impl S3BroadcastReceiveProxy {
+    pub fn new(
+        s3_client: Client,
+        client_semaphore: Arc<Semaphore>,
+        s3_options: Arc<S3Options>,
+        burst_options: Arc<BurstOptions>,
+        keys: Arc<Mutex<Keys>>,
+    ) -> Self {
+        Self {
+            s3_client,
+            client_semaphore,
+            s3_options,
+            burst_options,
+            keys,
         }
     }
 }
 
+#[async_trait]
+impl BroadcastReceiveProxy for S3BroadcastReceiveProxy {
+    async fn broadcast_recv(&self) -> Result<Message> {
+        let permit = self.client_semaphore.acquire().await;
+        if permit.is_err() {
+            return Err("Failed to acquire semaphore permit".into());
+        }
+
+        let mut keys = self.keys.lock().await;
+        let prefix = format!("{}/broadcast/", self.burst_options.burst_id);
+        let key = match get_next_object_key(
+            prefix.as_str(),
+            self.s3_client.clone(),
+            self.s3_options.clone(),
+            &mut keys,
+        )
+        .await
+        {
+            Ok(key) => key,
+            Err(err) => {
+                return Err(err);
+            }
+        };
+        drop(keys);
+
+        let bucket = self.s3_options.bucket.clone();
+        let msg = match get_object_as_message(&bucket, &key, &self.s3_client).await? {
+            Some(msg) => msg,
+            None => {
+                return Err(format!("Failed to get object {} as message", key).into());
+            }
+        };
+
+        drop(permit);
+        return Ok(msg);
+    }
+}
+
+// Helper functions
+
 fn format_message_key(burst_id: &str, dest: u32, msg: &Message) -> String {
     format!(
-        "{}/worker-{}/message-{}/sender-{}/counter-{}/part-{}",
-        burst_id, dest, msg.collective, msg.sender_id, msg.counter, msg.chunk_id
+        "{}/worker-{}/sender-{}/counter-{}/part-{}",
+        burst_id, dest, msg.sender_id, msg.counter, msg.chunk_id
     )
 }
 
-async fn get_next_object_key(proxy: &S3ReceiveProxy) -> Result<String> {
-    let mut keys = proxy.keys.lock().await;
+async fn get_object_as_message(
+    bucket: &String,
+    key: &String,
+    s3_client: &Client,
+) -> Result<Option<Message>> {
+    log::debug!("S3 Get object with key {}...", key);
+    let obj = s3_client
+        .get_object()
+        .bucket(bucket)
+        .key(key.clone())
+        .send()
+        .await?;
+
+    let (sender_id, collective_type, counter, chunk_id, num_chunks) = match obj.metadata() {
+        Some(metadata) => {
+            let sender_id = match metadata.get("sender_id") {
+                Some(sender_id) => match sender_id.parse::<u32>() {
+                    Ok(sender_id) => sender_id,
+                    Err(err) => {
+                        log::error!("Failed to parse sender_id: {}", err);
+                        return Ok(None);
+                    }
+                },
+                None => {
+                    log::error!("No sender_id found in metadata for key: {}", key);
+                    return Ok(None);
+                }
+            };
+            let collective_type = match metadata.get("collective") {
+                Some(collective) => match collective.as_str() {
+                    "Direct" => CollectiveType::Direct,
+                    "Broadcast" => CollectiveType::Broadcast,
+                    "Scatter" => CollectiveType::Scatter,
+                    "Gather" => CollectiveType::Gather,
+                    "AllToAll" => CollectiveType::AllToAll,
+                    _ => {
+                        log::error!("Invalid collective type: {}", collective);
+                        return Ok(None);
+                    }
+                },
+                None => {
+                    log::error!("No collective found in metadata for key: {}", key);
+                    return Ok(None);
+                }
+            };
+            let counter = match metadata.get("counter") {
+                Some(counter) => match counter.parse::<u32>() {
+                    Ok(counter) => counter,
+                    Err(err) => {
+                        log::error!("Failed to parse counter: {}", err);
+                        return Ok(None);
+                    }
+                },
+                None => {
+                    log::error!("No counter found in metadata for key: {}", key);
+                    return Ok(None);
+                }
+            };
+            let chunk_id = match metadata.get("chunk_id") {
+                Some(chunk_id) => match chunk_id.parse::<u32>() {
+                    Ok(chunk_id) => chunk_id,
+                    Err(err) => {
+                        log::error!("Failed to parse chunk_id: {}", err);
+                        return Ok(None);
+                    }
+                },
+                None => {
+                    log::error!("No chunk_id found in metadata for key: {}", key);
+                    return Ok(None);
+                }
+            };
+            let num_chunks = match metadata.get("num_chunks") {
+                Some(num_chunks) => match num_chunks.parse::<u32>() {
+                    Ok(num_chunks) => num_chunks,
+                    Err(err) => {
+                        log::error!("Failed to parse num_chunks: {}", err);
+                        return Ok(None);
+                    }
+                },
+                None => {
+                    log::error!("No num_chunks found in metadata for key: {}", key);
+                    return Ok(None);
+                }
+            };
+            (sender_id, collective_type, counter, chunk_id, num_chunks)
+        }
+        None => {
+            log::error!("No metadata found");
+            return Ok(None);
+        }
+    };
+    let bytes = obj.body.collect().await?.into_bytes();
+
+    log::debug!("S3 Got object {} with size {}", key, bytes.len());
+
+    s3_client
+        .delete_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await?;
+
+    Ok(Some(Message {
+        sender_id,
+        chunk_id,
+        num_chunks,
+        counter,
+        collective: collective_type,
+        data: bytes,
+    }))
+}
+
+async fn get_next_object_key(
+    prefix: &str,
+    s3_client: Client,
+    s3_options: Arc<S3Options>,
+    keys: &mut Keys,
+) -> Result<String> {
+    let mut retries = 0;
 
     while keys.pending.is_empty() {
-        let prefix = format!(
-            "{}/worker-{}/",
-            proxy.burst_options.burst_id, proxy.worker_id
-        );
         log::debug!("Listing keys with prefix {}...", prefix);
-        let s3_keys: aws_sdk_s3::operation::list_objects::ListObjectsOutput = proxy
-            .s3_client
+        let s3_keys: aws_sdk_s3::operation::list_objects::ListObjectsOutput = s3_client
             .list_objects()
-            .bucket(proxy.s3_options.bucket.clone())
+            .bucket(&s3_options.bucket)
             .prefix(prefix)
             .send()
             .await?;
@@ -633,18 +666,21 @@ async fn get_next_object_key(proxy: &S3ReceiveProxy) -> Result<String> {
             None => {
                 log::debug!(
                     "No keys found, sleeping for {} seconds",
-                    proxy.s3_options.wait_time
+                    s3_options.wait_time
                 );
-                tokio::time::sleep(tokio::time::Duration::from_secs_f64(
-                    proxy.s3_options.wait_time,
-                ))
-                .await;
+                tokio::time::sleep(tokio::time::Duration::from_secs_f64(s3_options.wait_time))
+                    .await;
+                retries += 1;
             }
+        }
+
+        if retries >= s3_options.retry {
+            return Err("Failed to get next object key".into());
         }
     }
 
     log::debug!("{} pending keys", keys.pending.len());
 
     let key = keys.pending.pop().unwrap();
-    return Ok(key);
+    Ok(key)
 }

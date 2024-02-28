@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use bytes::Bytes;
 use deadpool_lapin::{Config, Pool, PoolConfig, Runtime};
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use lapin::{
     message::Delivery,
     options::{
@@ -17,8 +17,8 @@ use lapin::{
 use uuid::Uuid;
 
 use crate::{
-    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
-    Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BroadcastProxy, BroadcastReceiveProxy, BroadcastSendProxy, BurstOptions,
+    Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
 };
 
 #[derive(Clone, Debug)]
@@ -80,11 +80,7 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         rabbitmq_options: RabbitMQOptions,
-        broadcast_proxy: Box<dyn BroadcastSendProxy>,
-    ) -> Result<(
-        HashMap<u32, Box<dyn SendReceiveProxy>>,
-        Box<dyn BroadcastSendProxy>,
-    )> {
+    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>> {
         let rabbitmq_options = Arc::new(rabbitmq_options);
 
         let current_group = burst_options
@@ -104,40 +100,319 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
             pool.clone(),
             burst_options.clone(),
             rabbitmq_options.clone(),
-            broadcast_proxy,
         )
         .await?;
 
-        let mut hmap = HashMap::new();
+        let mut proxies = HashMap::new();
 
         futures::future::try_join_all(current_group.iter().map(|worker_id| {
             let r = rabbitmq_options.clone();
             let b = burst_options.clone();
             let p = pool.clone();
-            async move { RabbitMQProxy::new(r, b, *worker_id, p).await }
+            async move {
+                let proxy = RabbitMQProxy::new(r.clone(), b.clone(), *worker_id, p.clone())
+                    .await
+                    .unwrap();
+                let broadcast_proxy = RabbitMQBroadcastProxy::new(r.clone(), b.clone(), p.clone())
+                    .await
+                    .unwrap();
+                Ok::<_, lapin::Error>((*worker_id, proxy, broadcast_proxy))
+            }
         }))
         .await?
         .into_iter()
-        .for_each(|proxy| {
-            hmap.insert(
-                proxy.worker_id,
-                Box::new(proxy) as Box<dyn SendReceiveProxy>,
+        .for_each(|(worker_id, proxy, broadcast_proxy)| {
+            proxies.insert(
+                worker_id,
+                (
+                    Box::new(proxy) as Box<dyn SendReceiveProxy>,
+                    Box::new(broadcast_proxy) as Box<dyn BroadcastProxy>,
+                ),
             );
         });
 
-        Ok((
-            hmap,
-            Box::new(RabbitMQBroadcastSendProxy::new(rabbitmq_options, burst_options, pool).await?)
-                as Box<dyn BroadcastSendProxy>,
-        ))
+        return Ok(proxies);
     }
 }
+
+// DIRECT PROXIES
+
+pub struct RabbitMQProxy {
+    sender: Box<dyn SendProxy>,
+    receiver: Box<dyn ReceiveProxy>,
+}
+
+pub struct RabbitMQSendProxy {
+    pool: Pool,
+    rabbitmq_options: Arc<RabbitMQOptions>,
+    burst_options: Arc<BurstOptions>,
+}
+
+pub struct RabbitMQReceiveProxy {
+    rabbitmq_options: Arc<RabbitMQOptions>,
+    consumer: Consumer,
+}
+
+impl SendReceiveProxy for RabbitMQProxy {}
+
+#[async_trait]
+impl SendProxy for RabbitMQProxy {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
+        self.sender.send(dest, msg).await
+    }
+}
+
+#[async_trait]
+impl ReceiveProxy for RabbitMQProxy {
+    async fn recv(&self, source: u32) -> Result<Message> {
+        self.receiver.recv(source).await
+    }
+}
+
+impl RabbitMQProxy {
+    pub async fn new(
+        rabbitmq_options: Arc<RabbitMQOptions>,
+        burst_options: Arc<BurstOptions>,
+        worker_id: u32,
+        pool: Pool,
+    ) -> Result<Self> {
+        Ok(Self {
+            sender: Box::new(
+                RabbitMQSendProxy::new(
+                    rabbitmq_options.clone(),
+                    burst_options.clone(),
+                    pool.clone(),
+                )
+                .await?,
+            ),
+            receiver: Box::new(
+                RabbitMQReceiveProxy::new(worker_id, rabbitmq_options, burst_options, pool).await?,
+            ),
+        })
+    }
+}
+
+#[async_trait]
+impl SendProxy for RabbitMQSendProxy {
+    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
+        send_direct(
+            &self.pool,
+            &msg,
+            dest,
+            &self.rabbitmq_options,
+            &self.burst_options,
+        )
+        .await
+    }
+}
+
+impl RabbitMQSendProxy {
+    pub async fn new(
+        rabbitmq_options: Arc<RabbitMQOptions>,
+        burst_options: Arc<BurstOptions>,
+        pool: Pool,
+    ) -> Result<Self> {
+        Ok(Self {
+            pool,
+            rabbitmq_options,
+            burst_options,
+        })
+    }
+}
+
+#[async_trait]
+impl ReceiveProxy for RabbitMQReceiveProxy {
+    async fn recv(&self, _source: u32) -> Result<Message> {
+        let delivery = self.consumer.clone().try_next().await?;
+        let delivery = delivery.ok_or("No message received")?;
+        log::debug!(
+            "RabbitMQ Basic consume, routing key: {:?}, exchange: {:?}",
+            delivery.routing_key,
+            delivery.exchange
+        );
+        if self.rabbitmq_options.ack {
+            delivery.ack(BasicAckOptions::default()).await?;
+        }
+        Ok(parse_message_from_delivery(delivery))
+    }
+}
+
+impl RabbitMQReceiveProxy {
+    pub async fn new(
+        worker_id: u32,
+        rabbitmq_options: Arc<RabbitMQOptions>,
+        burst_options: Arc<BurstOptions>,
+        pool: Pool,
+    ) -> Result<Self> {
+        let connection = pool.get().await?;
+        let channel = connection.create_channel().await?;
+        let queue_name = get_queue_name(
+            &rabbitmq_options.queue_prefix,
+            &burst_options.burst_id,
+            worker_id,
+        );
+        let consumer = channel
+            .basic_consume(
+                &queue_name,
+                &get_consumer_tag(),
+                BasicConsumeOptions {
+                    no_ack: !rabbitmq_options.ack,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await?;
+
+        Ok(Self {
+            rabbitmq_options,
+            consumer,
+        })
+    }
+}
+
+// BROADCAST PROXIES
+
+pub struct RabbitMQBroadcastProxy {
+    broadcast_sender: Box<dyn BroadcastSendProxy>,
+    broadcast_receiver: Box<dyn BroadcastReceiveProxy>,
+}
+
+pub struct RabbitMQBroadcastSendProxy {
+    pool: Pool,
+    rabbitmq_options: Arc<RabbitMQOptions>,
+    burst_options: Arc<BurstOptions>,
+}
+
+pub struct RabbitMQBroadcastReceiveProxy {
+    rabbitmq_options: Arc<RabbitMQOptions>,
+    consumer: Consumer,
+}
+
+impl BroadcastProxy for RabbitMQBroadcastProxy {}
+
+impl RabbitMQBroadcastProxy {
+    pub async fn new(
+        rabbitmq_options: Arc<RabbitMQOptions>,
+        burst_options: Arc<BurstOptions>,
+        pool: Pool,
+    ) -> Result<Self> {
+        Ok(Self {
+            broadcast_sender: Box::new(
+                RabbitMQBroadcastSendProxy::new(
+                    rabbitmq_options.clone(),
+                    burst_options.clone(),
+                    pool.clone(),
+                )
+                .await?,
+            ),
+            broadcast_receiver: Box::new(
+                RabbitMQBroadcastReceiveProxy::new(
+                    rabbitmq_options.clone(),
+                    burst_options.clone(),
+                    pool.clone(),
+                )
+                .await?,
+            ),
+        })
+    }
+}
+
+#[async_trait]
+impl BroadcastSendProxy for RabbitMQBroadcastProxy {
+    async fn broadcast_send(&self, msg: Message) -> Result<()> {
+        self.broadcast_sender.broadcast_send(msg).await
+    }
+}
+
+#[async_trait]
+impl BroadcastReceiveProxy for RabbitMQBroadcastProxy {
+    async fn broadcast_recv(&self) -> Result<Message> {
+        self.broadcast_receiver.broadcast_recv().await
+    }
+}
+
+#[async_trait]
+impl BroadcastSendProxy for RabbitMQBroadcastSendProxy {
+    async fn broadcast_send(&self, msg: Message) -> Result<()> {
+        send_broadcast(
+            &self.pool,
+            &msg,
+            &self.rabbitmq_options,
+            &self.burst_options,
+        )
+        .await
+    }
+}
+
+impl RabbitMQBroadcastSendProxy {
+    pub async fn new(
+        rabbitmq_options: Arc<RabbitMQOptions>,
+        burst_options: Arc<BurstOptions>,
+        pool: Pool,
+    ) -> Result<Self> {
+        Ok(Self {
+            pool,
+            rabbitmq_options,
+            burst_options,
+        })
+    }
+}
+
+#[async_trait]
+impl BroadcastReceiveProxy for RabbitMQBroadcastReceiveProxy {
+    async fn broadcast_recv(&self) -> Result<Message> {
+        // log::debug!("RabbitMQ Basic consume");
+        let delivery = self.consumer.clone().try_next().await?;
+        let delivery = delivery.ok_or("No message received")?;
+        log::debug!(
+            "RabbitMQ Basic consume, routing key: {:?}, exchange: {:?}",
+            delivery.routing_key,
+            delivery.exchange
+        );
+        if self.rabbitmq_options.ack {
+            delivery.ack(BasicAckOptions::default()).await?;
+        }
+        Ok(parse_message_from_delivery(delivery))
+    }
+}
+
+impl RabbitMQBroadcastReceiveProxy {
+    pub async fn new(
+        rabbitmq_options: Arc<RabbitMQOptions>,
+        burst_options: Arc<BurstOptions>,
+        pool: Pool,
+    ) -> Result<Self> {
+        let broadcast_channel = pool.get().await?.create_channel().await?;
+        let broadcast_queue = get_broadcast_queue_name(
+            &rabbitmq_options.broadcast_queue_prefix,
+            &burst_options.burst_id,
+            &burst_options.group_id,
+        );
+        let broadcast_consumer = broadcast_channel
+            .basic_consume(
+                &broadcast_queue,
+                &get_consumer_tag(),
+                BasicConsumeOptions {
+                    no_ack: !rabbitmq_options.ack,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await?;
+
+        Ok(Self {
+            rabbitmq_options,
+            consumer: broadcast_consumer,
+        })
+    }
+}
+
+// Helper Functions
 
 async fn init_rabbit(
     pool: Pool,
     burst_options: Arc<BurstOptions>,
     rabbitmq_options: Arc<RabbitMQOptions>,
-    broadcast_proxy: Box<dyn BroadcastSendProxy>,
 ) -> Result<()> {
     let connection = pool.get().await?;
     let channel = connection.create_channel().await?;
@@ -245,217 +520,7 @@ async fn init_rabbit(
     ))
     .await?;
 
-    // spawn task to receive broadcast messages and send them to the broadcast proxy
-    let broadcast_channel = channel;
-    let broadcast_queue = get_broadcast_queue_name(
-        &rabbitmq_options.broadcast_queue_prefix,
-        &burst_options.burst_id,
-        &burst_options.group_id,
-    );
-    let broadcast_consumer = broadcast_channel
-        .basic_consume(
-            &broadcast_queue,
-            &get_consumer_tag(),
-            BasicConsumeOptions {
-                no_ack: !rabbitmq_options.ack,
-                ..Default::default()
-            },
-            FieldTable::default(),
-        )
-        .await?;
-    let r = rabbitmq_options.clone();
-    tokio::spawn(async move {
-        let mut broadcast_consumer = broadcast_consumer;
-        while let Some(delivery) = broadcast_consumer.next().await {
-            let delivery = delivery.unwrap();
-            if r.ack {
-                broadcast_channel
-                    .basic_ack(delivery.delivery_tag, BasicAckOptions::default())
-                    .await
-                    .unwrap();
-            }
-            let msg = get_message(delivery);
-            broadcast_proxy.broadcast_send(msg).await.unwrap();
-        }
-    });
-
     Ok(())
-}
-
-pub struct RabbitMQProxy {
-    worker_id: u32,
-    receiver: Box<dyn ReceiveProxy>,
-    sender: Box<dyn SendProxy>,
-}
-
-pub struct RabbitMQSendProxy {
-    pool: Pool,
-    rabbitmq_options: Arc<RabbitMQOptions>,
-    burst_options: Arc<BurstOptions>,
-}
-
-pub struct RabbitMQReceiveProxy {
-    rabbitmq_options: Arc<RabbitMQOptions>,
-    consumer: Consumer,
-}
-
-pub struct RabbitMQBroadcastSendProxy {
-    pool: Pool,
-    rabbitmq_options: Arc<RabbitMQOptions>,
-    burst_options: Arc<BurstOptions>,
-}
-
-impl SendReceiveProxy for RabbitMQProxy {}
-
-#[async_trait]
-impl SendProxy for RabbitMQProxy {
-    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
-        self.sender.send(dest, msg).await
-    }
-}
-
-#[async_trait]
-impl ReceiveProxy for RabbitMQProxy {
-    async fn recv(&self, source: u32) -> Result<Message> {
-        self.receiver.recv(source).await
-    }
-}
-
-impl RabbitMQProxy {
-    pub async fn new(
-        rabbitmq_options: Arc<RabbitMQOptions>,
-        burst_options: Arc<BurstOptions>,
-        worker_id: u32,
-        pool: Pool,
-    ) -> Result<Self> {
-        Ok(Self {
-            worker_id,
-            sender: Box::new(
-                RabbitMQSendProxy::new(
-                    rabbitmq_options.clone(),
-                    burst_options.clone(),
-                    pool.clone(),
-                )
-                .await?,
-            ),
-            receiver: Box::new(
-                RabbitMQReceiveProxy::new(worker_id, rabbitmq_options, burst_options, pool).await?,
-            ),
-        })
-    }
-}
-
-#[async_trait]
-impl SendProxy for RabbitMQSendProxy {
-    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
-        if msg.collective == CollectiveType::Broadcast {
-            Err("Cannot send broadcast message to a single destination".into())
-        } else {
-            send_direct(
-                &self.pool,
-                &msg,
-                dest,
-                &self.rabbitmq_options,
-                &self.burst_options,
-            )
-            .await
-        }
-    }
-}
-
-impl RabbitMQSendProxy {
-    pub async fn new(
-        rabbitmq_options: Arc<RabbitMQOptions>,
-        burst_options: Arc<BurstOptions>,
-        pool: Pool,
-    ) -> Result<Self> {
-        Ok(Self {
-            pool,
-            rabbitmq_options,
-            burst_options,
-        })
-    }
-}
-
-#[async_trait]
-impl ReceiveProxy for RabbitMQReceiveProxy {
-    async fn recv(&self, _source: u32) -> Result<Message> {
-        let delivery = self.consumer.clone().try_next().await?;
-        let delivery = delivery.ok_or("No message received")?;
-        log::debug!(
-            "RabbitMQ Basic consume, routing key: {:?}, exchange: {:?}",
-            delivery.routing_key,
-            delivery.exchange
-        );
-        if self.rabbitmq_options.ack {
-            delivery.ack(BasicAckOptions::default()).await?;
-        }
-        Ok(get_message(delivery))
-    }
-}
-
-impl RabbitMQBroadcastSendProxy {
-    pub async fn new(
-        rabbitmq_options: Arc<RabbitMQOptions>,
-        burst_options: Arc<BurstOptions>,
-        pool: Pool,
-    ) -> Result<Self> {
-        Ok(Self {
-            pool,
-            rabbitmq_options,
-            burst_options,
-        })
-    }
-}
-
-#[async_trait]
-impl BroadcastSendProxy for RabbitMQBroadcastSendProxy {
-    async fn broadcast_send(&self, msg: Message) -> Result<()> {
-        log::debug!("BROADCAST BROADCAST BROADCAST");
-        if msg.collective != CollectiveType::Broadcast {
-            Err("Cannot send non-broadcast message to broadcast".into())
-        } else {
-            send_broadcast(
-                &self.pool,
-                &msg,
-                &self.rabbitmq_options,
-                &self.burst_options,
-            )
-            .await
-        }
-    }
-}
-
-impl RabbitMQReceiveProxy {
-    pub async fn new(
-        worker_id: u32,
-        rabbitmq_options: Arc<RabbitMQOptions>,
-        burst_options: Arc<BurstOptions>,
-        pool: Pool,
-    ) -> Result<Self> {
-        let connection = pool.get().await?;
-        let channel = connection.create_channel().await?;
-        let queue_name = get_queue_name(
-            &rabbitmq_options.queue_prefix,
-            &burst_options.burst_id,
-            worker_id,
-        );
-        let consumer = channel
-            .basic_consume(
-                &queue_name,
-                &get_consumer_tag(),
-                BasicConsumeOptions {
-                    no_ack: !rabbitmq_options.ack,
-                    ..Default::default()
-                },
-                FieldTable::default(),
-            )
-            .await?;
-        Ok(Self {
-            rabbitmq_options,
-            consumer,
-        })
-    }
 }
 
 async fn send_direct(
@@ -572,7 +637,7 @@ fn create_headers(msg: &Message) -> FieldTable {
     fields
 }
 
-fn get_message(delivery: Delivery) -> Message {
+fn parse_message_from_delivery(delivery: Delivery) -> Message {
     let data = Bytes::from(delivery.data);
     let map = delivery.properties.headers().as_ref().unwrap().inner();
 

@@ -54,21 +54,21 @@ fn main() {
         //     .durable_queues(true)
         //     .ack(true)
         //     .build();
-        let backend_options = S3Options::new(env::var("S3_BUCKET").unwrap())
-            .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
-            .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
-            .session_token(None)
-            .region(env::var("S3_REGION").unwrap())
-            .endpoint(Some("http://localhost:9000".to_string()))
-            .enable_broadcast(true)
-            .wait_time(0.2)
-            .build();
-        // let redislist_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
+        // let backend_options = S3Options::new(env::var("S3_BUCKET").unwrap())
+        //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
+        //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
+        //     .session_token(None)
+        //     .region(env::var("S3_REGION").unwrap())
+        //     .endpoint(Some("http://localhost:9000".to_string()))
+        //     .enable_broadcast(true)
+        //     .wait_time(3.0)
+        //     .build();
+        let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
         // let backend_options = RedisStreamOptions::new("redis://127.0.0.1".to_string());
 
         let fut = tokio_runtime.spawn(BurstMiddleware::create_proxies::<
             TokioChannelImpl,
-            S3Impl,
+            RedisListImpl,
             _,
             _,
         >(burst_options, channel_options, backend_options));
@@ -113,14 +113,14 @@ fn worker(burst_middleware: MiddlewareActorHandle) {
             burst_middleware.info.worker_id,
             payload.len()
         );
-        burst_middleware.broadcast(Some(payload)).unwrap()
+        burst_middleware.broadcast(Some(payload), 0).unwrap()
     } else {
         log::info!(
             "worker {} (group {}) => waiting for broadcast",
             burst_middleware.info.worker_id,
             burst_middleware.info.group_id
         );
-        burst_middleware.broadcast(None).unwrap()
+        burst_middleware.broadcast(None, 0).unwrap()
     };
     log::info!(
         "worker {} (group {}) => received broadcast message with size {}",

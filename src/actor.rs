@@ -24,6 +24,7 @@ enum ActorMessage {
     },
     Broadcast {
         payload: Option<Bytes>,
+        root: u32,
         respond_to: oneshot::Sender<Result<Message>>,
     },
     Scatter {
@@ -90,10 +91,11 @@ impl MiddlewareActor {
                 };
             }
             ActorMessage::Broadcast {
+                root,
                 payload,
                 respond_to,
             } => {
-                let result = self.middleware.broadcast(payload).await;
+                let result = self.middleware.broadcast(payload, root).await;
                 match respond_to.send(result) {
                     Ok(_) => {}
                     Err(_) => {
@@ -195,11 +197,12 @@ impl MiddlewareActorHandle {
         return result;
     }
 
-    pub fn broadcast(&self, data: Option<Bytes>) -> Result<Message> {
+    pub fn broadcast(&self, data: Option<Bytes>, root: u32) -> Result<Message> {
         let (send, recv) = oneshot::channel();
 
         self.sender.blocking_send(ActorMessage::Broadcast {
             payload: data,
+            root,
             respond_to: send,
         })?;
 

@@ -2,11 +2,12 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 
-use burst_message_relay::{client::client::Client, client::connection_pool::ConnectionPool};
+use burst_message_relay::client::{client::Client, connection_pool::ConnectionPool};
 
 use crate::{
-    impl_chainable_setter, BroadcastSendProxy, BurstOptions, CollectiveType, Message, ReceiveProxy,
-    Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BroadcastProxy, BroadcastReceiveProxy, BroadcastSendProxy, BurstOptions,
+    CollectiveType, Error, Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory,
+    SendReceiveProxy,
 };
 
 #[derive(Clone)]
@@ -46,11 +47,7 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         server_options: BurstMessageRelayOptions,
-        broadcast_proxy: Box<dyn BroadcastSendProxy>,
-    ) -> Result<(
-        HashMap<u32, Box<dyn SendReceiveProxy>>,
-        Box<dyn BroadcastSendProxy>,
-    )> {
+    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>> {
         let current_group = burst_options
             .group_ranges
             .get(&burst_options.group_id)
@@ -78,84 +75,40 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
             client.create_bc_group(group_id, 1).await;
         }
 
-        let mut hmap = HashMap::new();
+        let mut proxies = HashMap::new();
 
         futures::future::try_join_all(current_group.iter().map(|worker_id| {
-            let o = server_options.clone();
-            let conn_pool_clone = connection_pool.clone();
-            async move { StreamServerProxy::new(o, conn_pool_clone.clone(), *worker_id).await }
+            let cp = connection_pool.clone();
+            let bo = burst_options.clone();
+            async move {
+                let proxy = StreamServerProxy::new(cp.clone(), *worker_id).await?;
+                let broadcast_proxy =
+                    StreamServerBroadcastProxy::new(bo.clone(), cp.clone()).await?;
+                Ok::<_, Error>((proxy, broadcast_proxy))
+            }
         }))
         .await?
         .into_iter()
-        .for_each(|proxy| {
-            hmap.insert(
+        .for_each(|(proxy, broadcast_proxy)| {
+            proxies.insert(
                 proxy.worker_id,
-                Box::new(proxy) as Box<dyn SendReceiveProxy>,
+                (
+                    Box::new(proxy) as Box<dyn SendReceiveProxy>,
+                    Box::new(broadcast_proxy) as Box<dyn BroadcastProxy>,
+                ),
             );
         });
 
-        let broadcast_proxy_arc = Arc::new(broadcast_proxy);
-
-        //spawn task to receive broadcast messages and send them to the broadcast proxy
-        let conn_pool = connection_pool.clone();
-        tokio::spawn({
-            let b = burst_options.clone();
-            async move {
-                loop {
-                    let mut client = Client::new(conn_pool.clone());
-
-                    let data = client.broadcast(&b.group_id).await;
-                    let msg = Message::from(data);
-
-                    if msg.num_chunks == 1 {
-                        broadcast_proxy_arc
-                            .clone()
-                            .broadcast_send(msg)
-                            .await
-                            .unwrap();
-                    } else {
-                        let group_id = b.group_id.clone();
-                        let missing_chunks = msg.num_chunks - 1;
-                        broadcast_proxy_arc.broadcast_send(msg).await.unwrap();
-
-                        let mut tasks = Vec::new();
-                        for _ in 0..missing_chunks {
-                            let connection_pool = conn_pool.clone();
-                            let bc_proxy_arc = broadcast_proxy_arc.clone();
-                            let gp_id = group_id.clone();
-                            let task = tokio::spawn(async move {
-                                let mut client = Client::new(connection_pool.clone());
-                                let data = client.broadcast(&gp_id).await;
-                                let msg = Message::from(data);
-                                bc_proxy_arc.broadcast_send(msg).await.unwrap();
-                            });
-                            tasks.push(task);
-                        }
-
-                        futures::future::join_all(tasks).await;
-                    }
-                }
-            }
-        });
-
-        Ok((
-            hmap,
-            Box::new(
-                StreamServerBroadcastProxy::new(
-                    server_options,
-                    connection_pool.clone(),
-                    burst_options,
-                )
-                .await?,
-            ),
-        ))
+        Ok(proxies)
     }
 }
 
+// DIRECT PROXIES
+
 pub struct StreamServerProxy {
-    worker_id: u32,
     receiver: Box<dyn ReceiveProxy>,
     sender: Box<dyn SendProxy>,
+    worker_id: u32,
 }
 
 pub struct StreamServerSendProxy {
@@ -165,11 +118,6 @@ pub struct StreamServerSendProxy {
 pub struct StreamServerReceiveProxy {
     worker_id: u32,
     connection_pool: Arc<ConnectionPool>,
-}
-
-pub struct StreamServerBroadcastProxy {
-    connection_pool: Arc<ConnectionPool>,
-    burst_options: Arc<BurstOptions>,
 }
 
 impl SendReceiveProxy for StreamServerProxy {}
@@ -189,23 +137,12 @@ impl ReceiveProxy for StreamServerProxy {
 }
 
 impl StreamServerProxy {
-    pub async fn new(
-        server_options: Arc<BurstMessageRelayOptions>,
-        connection_pool: Arc<ConnectionPool>,
-        worker_id: u32,
-    ) -> Result<Self> {
+    pub async fn new(connection_pool: Arc<ConnectionPool>, worker_id: u32) -> Result<Self> {
         Ok(Self {
             worker_id,
-            sender: Box::new(
-                StreamServerSendProxy::new(server_options.clone(), connection_pool.clone()).await?,
-            ),
+            sender: Box::new(StreamServerSendProxy::new(connection_pool.clone()).await?),
             receiver: Box::new(
-                StreamServerReceiveProxy::new(
-                    server_options.clone(),
-                    connection_pool.clone(),
-                    worker_id,
-                )
-                .await?,
+                StreamServerReceiveProxy::new(connection_pool.clone(), worker_id).await?,
             ),
         })
     }
@@ -227,10 +164,7 @@ impl SendProxy for StreamServerSendProxy {
 }
 
 impl StreamServerSendProxy {
-    pub async fn new(
-        _server_options: Arc<BurstMessageRelayOptions>,
-        connection_pool: Arc<ConnectionPool>,
-    ) -> Result<Self> {
+    pub async fn new(connection_pool: Arc<ConnectionPool>) -> Result<Self> {
         Ok(Self { connection_pool })
     }
 }
@@ -240,19 +174,12 @@ impl ReceiveProxy for StreamServerReceiveProxy {
     async fn recv(&self, _source: u32) -> Result<Message> {
         let mut client = Client::new(self.connection_pool.clone());
         let data = client.recv(self.worker_id).await;
-
-        let msg = Message::from(data);
-
-        Ok(msg)
+        Ok(Message::from(data))
     }
 }
 
 impl StreamServerReceiveProxy {
-    pub async fn new(
-        _server_options: Arc<BurstMessageRelayOptions>,
-        connection_pool: Arc<ConnectionPool>,
-        worker_id: u32,
-    ) -> Result<Self> {
+    pub async fn new(connection_pool: Arc<ConnectionPool>, worker_id: u32) -> Result<Self> {
         Ok(Self {
             worker_id,
             connection_pool,
@@ -260,20 +187,81 @@ impl StreamServerReceiveProxy {
     }
 }
 
+// BROADCAST PROXIES
+
+pub struct StreamServerBroadcastProxy {
+    broadcast_sender: Box<dyn BroadcastSendProxy>,
+    broadcast_receiver: Box<dyn BroadcastReceiveProxy>,
+}
+
+pub struct StreamServerBroadcastSendProxy {
+    dest_groups: Vec<String>,
+    connection_pool: Arc<ConnectionPool>,
+}
+
+pub struct StreamServerBroadcastReceiveProxy {
+    connection_pool: Arc<ConnectionPool>,
+    group_id: String,
+}
+
+impl BroadcastProxy for StreamServerBroadcastProxy {}
+
 #[async_trait]
 impl BroadcastSendProxy for StreamServerBroadcastProxy {
+    async fn broadcast_send(&self, msg: Message) -> Result<()> {
+        self.broadcast_sender.broadcast_send(msg).await
+    }
+}
+
+#[async_trait]
+impl BroadcastReceiveProxy for StreamServerBroadcastProxy {
+    async fn broadcast_recv(&self) -> Result<Message> {
+        self.broadcast_receiver.broadcast_recv().await
+    }
+}
+
+impl StreamServerBroadcastProxy {
+    pub async fn new(
+        burst_options: Arc<BurstOptions>,
+        connection_pool: Arc<ConnectionPool>,
+    ) -> Result<Self> {
+        Ok(Self {
+            broadcast_sender: Box::new(StreamServerBroadcastSendProxy::new(
+                burst_options.clone(),
+                connection_pool.clone(),
+            )),
+            broadcast_receiver: Box::new(StreamServerBroadcastReceiveProxy::new(
+                burst_options.clone(),
+                connection_pool.clone(),
+            )),
+        })
+    }
+}
+
+impl StreamServerBroadcastSendProxy {
+    pub fn new(burst_options: Arc<BurstOptions>, connection_pool: Arc<ConnectionPool>) -> Self {
+        let dest_groups = burst_options
+            .group_ranges
+            .keys()
+            .filter(|group_id| **group_id != burst_options.group_id)
+            .cloned()
+            .collect();
+        Self {
+            dest_groups,
+            connection_pool,
+        }
+    }
+}
+
+#[async_trait]
+impl BroadcastSendProxy for StreamServerBroadcastSendProxy {
     async fn broadcast_send(&self, msg: Message) -> Result<()> {
         if msg.collective != CollectiveType::Broadcast {
             Err("Cannot send non-broadcast message to broadcast".into())
         } else {
             let mut tasks = Vec::new();
 
-            for dest in self
-                .burst_options
-                .group_ranges
-                .keys()
-                .filter(|dest| **dest != self.burst_options.group_id)
-            {
+            for dest in &self.dest_groups {
                 let mes = msg.clone();
                 let str = dest.clone();
                 let conn_pool = self.connection_pool.clone();
@@ -291,15 +279,33 @@ impl BroadcastSendProxy for StreamServerBroadcastProxy {
     }
 }
 
-impl StreamServerBroadcastProxy {
-    pub async fn new(
-        _server_options: Arc<BurstMessageRelayOptions>,
-        connection_pool: Arc<ConnectionPool>,
-        burst_options: Arc<BurstOptions>,
-    ) -> Result<Self> {
-        Ok(Self {
+impl StreamServerBroadcastReceiveProxy {
+    pub fn new(burst_options: Arc<BurstOptions>, connection_pool: Arc<ConnectionPool>) -> Self {
+        Self {
             connection_pool,
-            burst_options,
-        })
+            group_id: burst_options.group_id.clone(),
+        }
     }
 }
+
+#[async_trait]
+impl BroadcastReceiveProxy for StreamServerBroadcastReceiveProxy {
+    async fn broadcast_recv(&self) -> Result<Message> {
+        let mut client = Client::new(self.connection_pool.clone());
+        let data = client.broadcast(&self.group_id).await;
+        Ok(Message::from(data))
+    }
+}
+
+// impl StreamServerBroadcastProxy {
+//     pub async fn new(
+//         _server_options: Arc<BurstMessageRelayOptions>,
+//         connection_pool: Arc<ConnectionPool>,
+//         burst_options: Arc<BurstOptions>,
+//     ) -> Result<Self> {
+//         Ok(Self {
+//             connection_pool,
+//             burst_options,
+//         })
+//     }
+// }

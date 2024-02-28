@@ -46,11 +46,7 @@ pub trait SendReceiveFactory<T>: Send + Sync {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         options: T,
-        broadcast_proxy: Box<dyn BroadcastSendProxy>,
-    ) -> Result<(
-        HashMap<u32, Box<dyn SendReceiveProxy>>,
-        Box<dyn BroadcastSendProxy>,
-    )>;
+    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>>;
 }
 
 #[async_trait]
@@ -58,10 +54,7 @@ pub trait SendReceiveLocalFactory<T>: Send + Sync {
     async fn create_proxies(
         burst_options: Arc<BurstOptions>,
         options: T,
-    ) -> Result<(
-        HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>,
-        Box<dyn BroadcastSendProxy>,
-    )>;
+    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>>;
 }
 
 #[derive(Clone, Debug)]
@@ -116,12 +109,13 @@ pub struct BurstMiddleware {
 
     worker_id: u32,
     group: HashSet<u32>,
+    group_worker_leader: u32,
 
     local_send_receive: Arc<dyn SendReceiveProxy>,
     remote_send_receive: Arc<dyn SendReceiveProxy>,
 
     local_broadcast: Arc<dyn BroadcastProxy>,
-    remote_broadcast_send: Arc<dyn BroadcastSendProxy>,
+    remote_broadcast: Arc<dyn BroadcastProxy>,
 
     collective_counters: HashMap<CollectiveType, u32>,
     send_counters: HashMap<u32, u32>,
@@ -148,25 +142,22 @@ impl BurstMiddleware {
         let options = Arc::new(options);
         let current_group = options.group_ranges.get(&options.group_id).unwrap();
 
-        let (mut local_proxies, broadcast_send) =
+        let mut local_proxies =
             LocalImpl::create_proxies(options.clone(), local_impl_options).await?;
-        let (mut remote_proxies, broadcast_send) =
-            RemoteImpl::create_proxies(options.clone(), remote_impl_options, broadcast_send)
-                .await?;
-
-        let broadcast_send: Arc<dyn BroadcastSendProxy> = broadcast_send.into();
+        let mut remote_proxies =
+            RemoteImpl::create_proxies(options.clone(), remote_impl_options).await?;
 
         let mut proxies = HashMap::new();
 
         for id in current_group {
-            let (lsp, lbp) = local_proxies.remove(id).unwrap();
-            let rsp = remote_proxies.remove(id).unwrap();
+            let (local_direct_proxy, local_broadcast_proxy) = local_proxies.remove(id).unwrap();
+            let (remote_direct_proxy, remote_broadcast_proxy) = remote_proxies.remove(id).unwrap();
             let proxy = BurstMiddleware::new(
                 options.clone(),
-                lsp.into(),
-                rsp.into(),
-                lbp.into(),
-                broadcast_send.clone(),
+                local_direct_proxy,
+                remote_direct_proxy,
+                local_broadcast_proxy,
+                remote_broadcast_proxy,
                 *id,
                 current_group.clone(),
             );
@@ -178,10 +169,10 @@ impl BurstMiddleware {
 
     pub fn new(
         options: Arc<BurstOptions>,
-        local_send_receive: Arc<dyn SendReceiveProxy>,
-        remote_send_receive: Arc<dyn SendReceiveProxy>,
-        local_broadcast: Arc<dyn BroadcastProxy>,
-        remote_broadcast_send: Arc<dyn BroadcastSendProxy>,
+        local_send_receive: Box<dyn SendReceiveProxy>,
+        remote_send_receive: Box<dyn SendReceiveProxy>,
+        local_broadcast: Box<dyn BroadcastProxy>,
+        remote_broadcast: Box<dyn BroadcastProxy>,
         worker_id: u32,
         group: HashSet<u32>,
     ) -> Self {
@@ -204,14 +195,18 @@ impl BurstMiddleware {
 
         let message_store = MessageStoreChunked::new(options.message_chunk_size);
 
+        // The worker with the lowest id in the group is the group leader
+        let group_worker_leader = *group.iter().min().unwrap();
+
         Self {
             options,
             worker_id,
             group,
-            local_send_receive,
-            remote_send_receive,
-            local_broadcast,
-            remote_broadcast_send,
+            group_worker_leader,
+            local_send_receive: local_send_receive.into(),
+            remote_send_receive: remote_send_receive.into(),
+            local_broadcast: local_broadcast.into(),
+            remote_broadcast: remote_broadcast.into(),
             collective_counters: counters,
             send_counters,
             receive_counters,
@@ -227,7 +222,7 @@ impl BurstMiddleware {
             sender_id: self.worker_id,
             chunk_id: 0,
             num_chunks: 1,
-            counter: counter,
+            counter,
             collective: CollectiveType::Direct,
             data,
         };
@@ -243,14 +238,14 @@ impl BurstMiddleware {
             .get_message(from, &CollectiveType::Direct, counter)
             .await?;
         Self::increment_counter(&mut self.receive_counters, &from)?;
-        return Ok(msg);
+        Ok(msg)
     }
 
-    pub async fn broadcast(&mut self, data: Option<Bytes>) -> Result<Message> {
+    pub async fn broadcast(&mut self, data: Option<Bytes>, root: u32) -> Result<Message> {
         let counter = Self::get_counter(&self.collective_counters, &CollectiveType::Broadcast)?;
 
-        // If root worker, broadcast
-        if self.worker_id == ROOT_ID {
+        if self.worker_id == root {
+            // The root worker sends the broadcast message
             let data = data.expect("Root worker must send data");
 
             let msg = Message {
@@ -262,7 +257,7 @@ impl BurstMiddleware {
                 data,
             };
 
-            // for local send we do in one chunk only
+            // Send the message to the local channel for the local group
             let local_fut = self.local_broadcast.broadcast_send(msg.clone());
 
             if self.enable_message_chunking {
@@ -272,29 +267,35 @@ impl BurstMiddleware {
 
                 let futures = chunked_messages
                     .into_iter()
-                    .map(|msg| Self::broadcast_send(Arc::clone(&self.remote_broadcast_send), msg))
+                    .map(|msg| Self::broadcast_send(Arc::clone(&self.remote_broadcast), msg))
                     .map(tokio::spawn)
                     .collect::<FuturesUnordered<_>>();
                 futures::future::try_join_all(futures).await?;
             } else {
                 // do remote send in one chunk
-                self.remote_broadcast_send.broadcast_send(msg).await?;
+                self.remote_broadcast.broadcast_send(msg).await?;
             }
 
             local_fut.await?;
+        } else {
+            // For non-root workers, check if the root worker is remote
+            // and if this worker is the group leader
+            if !self.group.contains(&root) && self.worker_id == self.group_worker_leader {
+                // Only the group leader receives the broadcast message via the remote channel
+                // And it will send it to the rest of the group via the local channel
+                let msg = self.get_broadcast_message(root, counter).await?;
+                // let msg = self.remote_broadcast.broadcast_recv().await?;
+                self.local_broadcast.broadcast_send(msg).await?;
+            }
         }
 
-        // Broadcast messages will only be received via the local channel
-        // Remote broadcast messages will be sent to the local channel
-        // by a separate thread
-        // Root worker and local group workers will receive the broadcast message
-        // via the local channel
-        let m = self.get_broadcast_message(counter).await?;
-
+        // Eventually all workers (root, local and remote)
+        // will receive the broadcast message via the local channel
+        let msg = self.local_broadcast.broadcast_recv().await?;
         // Increment broadcast counter
         Self::increment_counter(&mut self.collective_counters, &CollectiveType::Broadcast)?;
 
-        Ok(m)
+        Ok(msg)
     }
 
     pub async fn gather(&mut self, data: Bytes) -> Result<Option<Vec<Message>>> {
@@ -315,9 +316,9 @@ impl BurstMiddleware {
             gathered.push(msg);
 
             // create a new hashset with all worker ids except self
-            let sender_ids = HashSet::<u32>::from_iter((0..self.options.burst_size).into_iter())
+            let sender_ids = HashSet::<u32>::from_iter(0..self.options.burst_size)
                 .difference(&HashSet::from_iter(vec![self.worker_id]))
-                .map(|id| *id)
+                .copied()
                 .collect::<HashSet<u32>>();
             let messages = self
                 .get_messages(&CollectiveType::Gather, counter, sender_ids)
@@ -417,7 +418,7 @@ impl BurstMiddleware {
             .get_messages(
                 &CollectiveType::AllToAll,
                 counter,
-                HashSet::from_iter((0..self.options.burst_size).into_iter()),
+                HashSet::from_iter(0..self.options.burst_size),
             )
             .await?;
 
@@ -447,19 +448,17 @@ impl BurstMiddleware {
         if self.group.contains(&to) {
             // do local send always in one chunk
             return self.local_send_receive.send(to, msg).await;
+        } else if self.enable_message_chunking {
+            // do remote send with chunking if enabled
+            let chunked_messages = chunk_message(&msg, self.message_chunk_size);
+            log::debug!("Chunked message in {} parts", chunked_messages.len());
+            self.send_messages_to(to, chunked_messages).await?;
         } else {
-            if self.enable_message_chunking {
-                // do remote send with chunking if enabled
-                let chunked_messages = chunk_message(&msg, self.message_chunk_size);
-                log::debug!("Chunked message in {} parts", chunked_messages.len());
-                self.send_messages_to(to, chunked_messages).await?;
-            } else {
-                // do remote send in one chunk
-                return self.remote_send_receive.send(to, msg).await;
-            }
+            // do remote send in one chunk
+            return self.remote_send_receive.send(to, msg).await;
         }
 
-        return Ok(());
+        Ok(())
     }
 
     async fn send_messages(&self, msgs: Vec<(u32, Message)>) -> Result<()> {
@@ -472,7 +471,7 @@ impl BurstMiddleware {
                     (to, Arc::clone(&self.remote_send_receive), msg)
                 }
             })
-            .map(|(to, proxy, msg)| {
+            .flat_map(|(to, proxy, msg)| {
                 if self.enable_message_chunking {
                     // do remote send with chunking if enabled
                     let chunked_messages = chunk_message(&msg, self.message_chunk_size);
@@ -486,13 +485,12 @@ impl BurstMiddleware {
                     vec![(to, proxy, msg)]
                 }
             })
-            .flatten()
             .map(|(id, proxy, msg)| Self::proxy_send(id, proxy, msg))
             .map(tokio::spawn)
             .collect::<FuturesUnordered<_>>();
 
         futures::future::try_join_all(futures).await?;
-        return Ok(());
+        Ok(())
     }
 
     async fn send_messages_to(&self, to: u32, msgs: Vec<Message>) -> Result<()> {
@@ -508,7 +506,7 @@ impl BurstMiddleware {
             .collect::<FuturesUnordered<_>>();
 
         futures::future::try_join_all(futures).await?;
-        return Ok(());
+        Ok(())
     }
 
     async fn get_message(
@@ -540,8 +538,8 @@ impl BurstMiddleware {
             } else {
                 &self.remote_send_receive
             };
-            let msg = proxy.recv(from).await?;
 
+            let msg = proxy.recv(from).await?;
             log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
 
             // Check if this is the message we are waiting for
@@ -588,7 +586,7 @@ impl BurstMiddleware {
                 .num_chunks_stored(&from, &collective, &counter)
             {
                 Some(n) => num_chunks - n, // we will have at least 1 chunk in the buffer
-                None => panic!("???"),     // we should have at least the first chunk in the buffer
+                None => panic!("Inserted first chunk into buffer but now it's gone"), // we should have at least the first chunk in the buffer
             };
 
         if missing_chunks == 0 {
@@ -642,11 +640,11 @@ impl BurstMiddleware {
 
         // at this point, we should have all chunks in the buffer
         if let Some(msg) = self.message_buffer.get(&from, &collective, &counter) {
-            return Ok(msg);
+            Ok(msg)
         } else {
             // something went wrong
             // TODO try receiving more messages?
-            return Err("Waited for all chunks but some are missing".into());
+            Err("Waited for all chunks but some are missing".into())
         }
     }
 
@@ -661,7 +659,7 @@ impl BurstMiddleware {
         // Retrieve pending messages from buffer
         let mut sender_ids_found: HashSet<u32> = HashSet::new();
         for id in sender_ids.iter() {
-            if let Some(msg) = self.message_buffer.get(&id, collective, &counter) {
+            if let Some(msg) = self.message_buffer.get(id, collective, &counter) {
                 messages.push(msg);
                 sender_ids_found.insert(*id);
             }
@@ -719,11 +717,10 @@ impl BurstMiddleware {
             }
         }
 
-        return Ok(messages);
+        Ok(messages)
     }
 
-    // TODO -- this is a copy of get_message, refactor
-    async fn get_broadcast_message(&mut self, counter: u32) -> Result<Message> {
+    async fn get_broadcast_message(&mut self, root: u32, counter: u32) -> Result<Message> {
         // Check if complete message is in buffer
         if let Some(msg) = self
             .message_buffer
@@ -732,113 +729,108 @@ impl BurstMiddleware {
             return Ok(msg);
         };
 
-        // Block and receive next message
-        let msg = Self::broadcast_recv(Arc::clone(&self.local_broadcast)).await?;
-        log::debug!(
-            "[Worker {}] received broadcast message {:?}",
-            self.worker_id,
-            msg
-        );
-
-        // Check if this is the message we are waiting for
-        if msg.num_chunks == 1 && msg.counter == counter {
-            return Ok(msg);
-        }
-
-        if self.enable_message_chunking {
-            let missing_chunks = msg.num_chunks - 1;
-            self.message_buffer.insert(msg);
-
+        // Loop until we receive a message with the counter we are waiting for
+        loop {
+            let msg = Self::broadcast_recv(Arc::clone(&self.remote_broadcast)).await?;
             log::debug!(
-                "[Worker {}] Broadcast -- Waiting for {} missing chunks",
+                "[Worker {}] received broadcast message {:?}",
                 self.worker_id,
-                missing_chunks
+                msg
             );
 
-            // we will expect, at least, N - 1 more messages, where N is the number of chunks
-            let mut futures = (0..missing_chunks)
-                .map(|_| Self::broadcast_recv(Arc::clone(&self.local_broadcast)))
-                .map(tokio::spawn)
-                .collect::<FuturesUnordered<_>>();
+            // Check if this is the message we are waiting for
+            if msg.counter == counter {
+                if msg.num_chunks == 1 {
+                    return Ok(msg);
+                }
 
-            // Loop until all chunks are received
-            while let Some(fut) = futures.next().await {
-                match fut {
-                    Ok(fut_res) => {
-                        let msg = fut_res?;
-                        log::debug!(
-                            "[Worker {}] received broadcast message {:?}",
-                            self.worker_id,
-                            msg
+                // If message is chunked, we need to receive all chunks
+                if !self.enable_message_chunking || (msg.num_chunks) < 2 {
+                    panic!("get_complete_message called with non-chunked message")
+                }
+
+                // put first chunk into buffer, we will put the rest as we receive them
+                let num_chunks = msg.num_chunks;
+                self.message_buffer.insert(msg);
+
+                // Check if we have some chunks already in the buffer
+                let missing_chunks = match self.message_buffer.num_chunks_stored(
+                    &root,
+                    &CollectiveType::Broadcast,
+                    &counter,
+                ) {
+                    Some(n) => num_chunks - n, // we will have at least 1 chunk in the buffer
+                    None => panic!("Inserted first chunk into buffer but now it's gone"), // we should have at least the first chunk in the buffer
+                };
+
+                if missing_chunks == 0 {
+                    // we already have all chunks in the buffer, this was the last one
+                    if let Some(msg) =
+                        self.message_buffer
+                            .get(&root, &CollectiveType::Broadcast, &counter)
+                    {
+                        return Ok(msg);
+                    } else {
+                        // something went wrong
+                        return Err(
+                            "There are no missing chunks but the message is not complete".into(),
                         );
-
-                        if msg.counter != counter {
-                            // we got a message with another counter, we will need to receive yet another message
-                            futures.push(tokio::spawn(Self::broadcast_recv(Arc::clone(
-                                &self.local_broadcast,
-                            ))));
-                        }
-
-                        self.message_buffer.insert(msg);
-                    }
-                    Err(e) => {
-                        log::error!("Error receiving message {:?}", e);
                     }
                 }
-            }
 
-            log::debug!("[Worker {}] received all broadcast chunks", self.worker_id);
+                log::debug!(
+                    "Waiting for {} missing chunks for broadcast message (counter={})",
+                    missing_chunks,
+                    counter,
+                );
 
-            // at this point, we should have all chunks in the buffer
-            if let Some(msg) =
-                self.message_buffer
-                    .get(&ROOT_ID, &CollectiveType::Broadcast, &counter)
-            {
-                return Ok(msg);
-            } else {
-                // something went wrong
-                // TODO try receiving more messages?
-                return Err("(Broadcast) Waited for all chunks but some are missing".into());
-            }
-        } else {
-            // got a message with another counter, loop until we receive what we want
-            loop {
-                let msg = self.local_broadcast.broadcast_recv().await?;
-                log::debug!("[Worker {}] received message {:?}", self.worker_id, msg);
+                // we will expect, at least, N - 1 more messages, where N is the number of chunks
+                let mut futures = (0..missing_chunks)
+                    .map(|_| Self::broadcast_recv(Arc::clone(&self.remote_broadcast)))
+                    .map(tokio::spawn)
+                    .collect::<FuturesUnordered<_>>();
 
-                // Check if this is the message we are waiting for
-                if msg.num_chunks == 1 && msg.counter == counter {
+                // Loop until all chunks are received
+                while let Some(fut) = futures.next().await {
+                    match fut {
+                        Ok(fut_res) => {
+                            let msg = fut_res?;
+                            log::debug!("Received broadcast message {:?}", msg);
+
+                            if msg.counter != counter {
+                                // we got a message with another counter
+                                // we will need to receive yet another message
+                                futures.push(tokio::spawn(Self::broadcast_recv(Arc::clone(
+                                    &self.remote_broadcast,
+                                ))));
+                            }
+
+                            // Put msg into buffer, either if it's a chunk or another unrelated message
+                            self.message_buffer.insert(msg);
+                        }
+                        Err(e) => {
+                            log::error!("Error receiving message {:?}", e);
+                        }
+                    }
+                }
+
+                log::debug!("Received all broadcast chunks for counter={}", counter);
+
+                // at this point, we should have all chunks in the buffer
+                if let Some(msg) =
+                    self.message_buffer
+                        .get(&root, &CollectiveType::Broadcast, &counter)
+                {
                     return Ok(msg);
                 } else {
-                    // If not, it into buffer and consume next message
-                    self.message_buffer.insert(msg);
-                    log::debug!(
-                        "[Worker {}] Broadcast -- Put message in buffer, get next message",
-                        self.worker_id
-                    )
+                    // something went wrong
+                    // TODO try receiving more messages?
+                    return Err("Waited for all chunks but some are missing".into());
                 }
             }
+            // we got a message with another counter, put it into buffer and get next message
+            self.message_buffer.insert(msg);
         }
-
-        // loop {
-        //     // receive blocking
-        //     let msg = Self::broadcast_recv(Arc::clone(&self.local_broadcast)).await?;
-        //     log::debug!("worker {} received message {:?}", self.worker_id, msg);
-
-        //     if msg.num_chunks == 1 && msg.counter == counter {
-        //         return Ok(msg);
-        //     }
-
-        //     let sender_id = msg.sender_id;
-        //     self.message_store.insert(msg);
-        //     if let Some(msg) =
-        //         self.message_store
-        //             .get(&sender_id, &CollectiveType::Broadcast, &counter)
-        //     {
-        //         log::debug!("Got complete message {:?}", msg);
-        //         return Ok(msg);
-        //     };
-        // }
     }
 
     async fn proxy_recv(from: u32, proxy: Arc<dyn SendReceiveProxy>) -> (u32, Result<Message>) {
@@ -849,7 +841,7 @@ impl BurstMiddleware {
         proxy.send(to, msg).await
     }
 
-    async fn broadcast_send(proxy: Arc<dyn BroadcastSendProxy>, msg: Message) -> Result<()> {
+    async fn broadcast_send(proxy: Arc<dyn BroadcastProxy>, msg: Message) -> Result<()> {
         proxy.broadcast_send(msg).await
     }
 
@@ -862,7 +854,7 @@ impl BurstMiddleware {
         T: Eq + PartialEq + Hash + Debug,
     {
         map.get(key)
-            .map(|c| *c)
+            .copied()
             .ok_or(format!("Counter not found for key {:?}", key).into())
     }
 
