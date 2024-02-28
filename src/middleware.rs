@@ -1,6 +1,6 @@
 use crate::{
-    chunk_store::chunk_message, impl_chainable_setter, message_store::MessageStoreChunked,
-    CollectiveType, Message, Result,
+    chunk_store::chunk_message, impl_chainable_setter, message_store::MessageStore, CollectiveType,
+    Message, Result,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -11,8 +11,6 @@ use std::{
     hash::Hash,
     sync::Arc,
 };
-
-const ROOT_ID: u32 = 0;
 
 const MB: usize = 1024 * 1024;
 const DEFAULT_MESSAGE_CHUNK_SIZE: usize = 1 * MB;
@@ -121,7 +119,7 @@ pub struct BurstMiddleware {
     send_counters: HashMap<u32, u32>,
     receive_counters: HashMap<u32, u32>,
 
-    message_buffer: MessageStoreChunked,
+    message_buffer: MessageStore,
     enable_message_chunking: bool,
     message_chunk_size: usize,
 }
@@ -193,7 +191,7 @@ impl BurstMiddleware {
         let send_counters: HashMap<u32, u32> = (0..options.burst_size).map(|id| (id, 0)).collect();
         let receive_counters = send_counters.clone();
 
-        let message_store = MessageStoreChunked::new(options.message_chunk_size);
+        let message_store = MessageStore::new(options.message_chunk_size);
 
         // The worker with the lowest id in the group is the group leader
         let group_worker_leader = *group.iter().min().unwrap();
@@ -298,7 +296,7 @@ impl BurstMiddleware {
         Ok(msg)
     }
 
-    pub async fn gather(&mut self, data: Bytes) -> Result<Option<Vec<Message>>> {
+    pub async fn gather(&mut self, data: Bytes, root: u32) -> Result<Option<Vec<Message>>> {
         let counter = Self::get_counter(&self.collective_counters, &CollectiveType::Gather)?;
 
         let mut result: Option<Vec<Message>> = None;
@@ -311,7 +309,7 @@ impl BurstMiddleware {
             data,
         };
 
-        if self.worker_id == ROOT_ID {
+        if self.worker_id == root {
             let mut gathered = Vec::with_capacity(self.options.burst_size as usize);
             gathered.push(msg);
 
@@ -329,41 +327,42 @@ impl BurstMiddleware {
 
             result = Some(gathered)
         } else {
-            self.send_message(ROOT_ID, msg).await?;
+            self.send_message(root, msg).await?;
         }
 
         Self::increment_counter(&mut self.collective_counters, &CollectiveType::Gather)?;
         Ok(result)
     }
 
-    pub async fn scatter(&mut self, data: Option<Vec<Bytes>>) -> Result<Message> {
+    pub async fn scatter(&mut self, data: Option<Vec<Bytes>>, root: u32) -> Result<Message> {
         let counter = Self::get_counter(&self.collective_counters, &CollectiveType::Scatter)?;
 
         let result: Message;
 
-        if self.worker_id == ROOT_ID {
+        if self.worker_id == root {
             let data = data.expect("Root worker must send data");
             if data.len() != (self.options.burst_size as usize) {
                 return Err("Data size must be equal to burst size".into());
             }
 
             result = Message {
-                sender_id: ROOT_ID,
+                sender_id: root,
                 chunk_id: 0,
                 num_chunks: 1,
                 counter,
                 collective: CollectiveType::Scatter,
-                data: data[ROOT_ID as usize].clone(),
+                data: data[root as usize].clone(),
             };
 
             let messages = data
                 .into_iter()
                 .enumerate()
+                .filter(|(to, _)| *to != root as usize)
                 .map(|(to, data)| {
                     (
                         to as u32,
                         Message {
-                            sender_id: ROOT_ID,
+                            sender_id: root,
                             chunk_id: 0,
                             num_chunks: 1,
                             counter,
@@ -377,7 +376,7 @@ impl BurstMiddleware {
             self.send_messages(messages).await?;
         } else {
             result = self
-                .get_message(ROOT_ID, &CollectiveType::Scatter, counter)
+                .get_message(root, &CollectiveType::Scatter, counter)
                 .await?;
         }
 
@@ -401,7 +400,7 @@ impl BurstMiddleware {
                 (
                     to as u32,
                     Message {
-                        sender_id: ROOT_ID,
+                        sender_id: self.worker_id,
                         chunk_id: 0,
                         num_chunks: 1,
                         counter,
@@ -724,7 +723,7 @@ impl BurstMiddleware {
         // Check if complete message is in buffer
         if let Some(msg) = self
             .message_buffer
-            .get(&ROOT_ID, &CollectiveType::Broadcast, &counter)
+            .get(&root, &CollectiveType::Broadcast, &counter)
         {
             return Ok(msg);
         };

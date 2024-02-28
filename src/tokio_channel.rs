@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use lapin::protocol::tx;
 use tokio::sync::{
     broadcast::{Receiver, Sender},
     mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -10,8 +9,7 @@ use tokio::sync::{
 
 use crate::{
     impl_chainable_setter, BroadcastProxy, BroadcastReceiveProxy, BroadcastSendProxy, BurstOptions,
-    CollectiveType, Message, ReceiveProxy, Result, SendProxy, SendReceiveLocalFactory,
-    SendReceiveProxy,
+    Message, ReceiveProxy, Result, SendProxy, SendReceiveLocalFactory, SendReceiveProxy,
 };
 
 const DEFAULT_BROADCAST_CHANNEL_SIZE: usize = 1024 * 1024;

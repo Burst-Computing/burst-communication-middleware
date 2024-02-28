@@ -1,113 +1,6 @@
 use crate::Message;
 use bytes::{Bytes, BytesMut};
 
-/// Trait representing a chunked message body.
-///
-/// This trait is used to define the behavior of a chunked message body, which is responsible for storing
-/// and retrieving chunks of a [`Message`] body.
-pub trait ChunkedMessageBody {
-    /// Inserts a chunk into the `ChunkStore` at the specified chunk ID.
-    ///
-    /// # Arguments
-    ///
-    /// * `chunk_id` - The ID of the chunk.
-    /// * `chunk` - The chunk data.
-    fn insert(&mut self, chunk_id: u32, chunk: Bytes);
-
-    /// Checks if all the chunks have been received.
-    ///
-    /// # Returns
-    ///
-    /// `true` if all the chunks have been received, `false` otherwise.
-    fn is_complete(&self) -> bool;
-
-    /// Retrieves the complete message by combining all the chunks.
-    ///
-    /// # Returns
-    ///
-    /// The complete message.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the message is not complete.
-    fn get_complete_body(self) -> Bytes;
-
-    /// Retrieves the total number of chunks in the message.
-    /// # Returns
-    /// The total number of chunks in the message.
-    fn get_num_chunks_stored(&self) -> u32;
-}
-
-/// A [`ChunkedMessageBody`] implementation that stores the chunks in a [`Vec`].
-#[derive(Debug)]
-pub struct VecChunkedMessageBody {
-    array: Vec<Bytes>,
-    num_chunks: u32,
-    num_chunks_stored: u32,
-    is_complete: bool,
-}
-
-impl VecChunkedMessageBody {
-    /// Creates a new [`ChunkedMessageBody`] instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `num_chunks` - The total number of chunks in the message.
-    ///
-    /// # Returns
-    ///
-    /// A new [`ChunkedMessageBody`] instance.
-    pub fn new(num_chunks: u32) -> Self {
-        let mut array = Vec::with_capacity(num_chunks as usize);
-        array.resize(num_chunks as usize, Bytes::new());
-        Self {
-            array,
-            num_chunks,
-            num_chunks_stored: 0,
-            is_complete: false,
-        }
-    }
-}
-
-impl ChunkedMessageBody for VecChunkedMessageBody {
-    fn insert(&mut self, chunk_id: u32, chunk: Bytes) {
-        if self.array[chunk_id as usize].is_empty() {
-            log::debug!("Inserting chunk {} of {}", chunk_id, self.num_chunks);
-            self.array[chunk_id as usize] = chunk;
-            self.num_chunks_stored += 1;
-            if self.num_chunks_stored == self.num_chunks {
-                log::debug!("Message is complete");
-                self.is_complete = true;
-            } else {
-                log::debug!(
-                    "Received {} of {} chunks",
-                    self.num_chunks_stored,
-                    self.num_chunks
-                );
-            }
-        } else {
-            log::warn!("Duplicated chunk {}", chunk_id);
-        }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.is_complete
-    }
-
-    fn get_complete_body(self) -> Bytes {
-        assert!(self.is_complete(), "Message is not complete");
-        let mut data = BytesMut::with_capacity(self.array.iter().map(|x| x.len()).sum());
-        for chunk in self.array {
-            data.extend_from_slice(&chunk);
-        }
-        data.freeze()
-    }
-
-    fn get_num_chunks_stored(&self) -> u32 {
-        self.num_chunks_stored
-    }
-}
-
 pub struct BytesMutChunkedMessageBody {
     chunked_buffs: Vec<BytesMut>,
     buff: BytesMut,
@@ -118,14 +11,11 @@ pub struct BytesMutChunkedMessageBody {
 
 impl BytesMutChunkedMessageBody {
     pub fn new(num_chunks: u32, chunk_size: usize) -> Self {
-        log::debug!("num_chunks: {}", num_chunks);
-        log::debug!("chunk_size: {}", chunk_size);
         let buff_size = (num_chunks as usize) * chunk_size;
         let mut buff = BytesMut::with_capacity(buff_size);
         unsafe {
             buff.set_len(buff_size);
         }
-        log::debug!("buff_size: {}", buff.len());
         let chunked_buffs: Vec<_> = (0..num_chunks).map(|_| buff.split_to(chunk_size)).collect();
         Self {
             chunked_buffs,
@@ -135,10 +25,8 @@ impl BytesMutChunkedMessageBody {
             num_chunks_stored: 0,
         }
     }
-}
 
-impl ChunkedMessageBody for BytesMutChunkedMessageBody {
-    fn insert(&mut self, chunk_id: u32, chunk: Bytes) {
+    pub fn insert(&mut self, chunk_id: u32, chunk: Bytes) {
         log::debug!("Inserting chunk {} of {}", chunk_id, self.num_chunks);
 
         self.bytes_written += chunk.len();
@@ -153,11 +41,11 @@ impl ChunkedMessageBody for BytesMutChunkedMessageBody {
         );
     }
 
-    fn is_complete(&self) -> bool {
+    pub fn is_complete(&self) -> bool {
         self.num_chunks_stored == self.num_chunks
     }
 
-    fn get_complete_body(mut self) -> Bytes {
+    pub fn get_complete_body(mut self) -> Bytes {
         assert!(self.is_complete(), "Message is not complete");
 
         for chunk in self.chunked_buffs.into_iter() {
@@ -167,21 +55,11 @@ impl ChunkedMessageBody for BytesMutChunkedMessageBody {
         self.buff.freeze()
     }
 
-    fn get_num_chunks_stored(&self) -> u32 {
+    pub fn get_num_chunks_stored(&self) -> u32 {
         self.num_chunks_stored
     }
 }
 
-/// Splits a message into multiple smaller messages (chunks) based on the maximum chunk size.
-///
-/// # Arguments
-///
-/// * `msg` - The original message.
-/// * `max_chunk_size` - The maximum size of each chunk.
-///
-/// # Returns
-///
-/// A vector of chunked messages.
 pub fn chunk_message(msg: &Message, max_chunk_size: usize) -> Vec<Message> {
     let mut chunks = Vec::new();
     let mut body = msg.data.clone();

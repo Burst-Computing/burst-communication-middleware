@@ -37,7 +37,7 @@ impl From<Vec<u8>> for Message {
         let header_size = std::mem::size_of::<Message>() - std::mem::size_of::<Bytes>();
         let (header, _) = v.split_at(header_size);
 
-        let mut msg = deserialize_header(&header);
+        let mut msg = deserialize_header(header);
 
         let mut data = Bytes::from(v);
         msg.data = data.split_off(header_size);

@@ -109,7 +109,7 @@ fn worker(burst_middleware: MiddlewareActorHandle) {
     // let data = Bytes::from(msg);
     let data = Bytes::from(vec![0; PAYLOAD_SIZE]);
 
-    match burst_middleware.gather(data).unwrap() {
+    match burst_middleware.gather(data, 0).unwrap() {
         Some(msgs) => {
             for msg in msgs {
                 info!(
