@@ -471,7 +471,8 @@ impl BurstMiddleware {
                 }
             })
             .flat_map(|(to, proxy, msg)| {
-                if self.enable_message_chunking {
+                // do local send always in one chunk
+                if self.enable_message_chunking && !self.group.contains(&to) {
                     // do remote send with chunking if enabled
                     let chunked_messages = chunk_message(&msg, self.message_chunk_size);
                     log::debug!("Chunked message in {} parts", chunked_messages.len());
