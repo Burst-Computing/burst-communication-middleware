@@ -429,6 +429,57 @@ impl BurstMiddleware {
         Ok(received_messages)
     }
 
+    pub async fn reduce<T>(&mut self, data: T, op: fn(T, T) -> T) -> Result<Option<T>>
+    where
+        T: Into<Bytes> + From<Bytes> + std::marker::Copy,
+    {
+        assert!(self.options.burst_size.is_power_of_two());
+        assert!(self.group.len().is_power_of_two());
+
+        let reduce_levels = (self.options.burst_size as f64).log2() as u32;
+        let mut data = data;
+
+        for level in 0..reduce_levels {
+            log::debug!("[Worker {}] Reduce level {}", self.worker_id, level);
+            let worker_offset = 1 << level;
+            if self.worker_id % (worker_offset << 1) == 0 {
+                let partner = self.worker_id + worker_offset;
+                log::debug!(
+                    "[Worker {}] Reduce ==> Get message from partner {}",
+                    self.worker_id,
+                    partner,
+                );
+
+                let msg = self
+                    .get_message(partner, &CollectiveType::Direct, 0)
+                    .await?;
+                let partner_data = T::from(msg.data);
+                let reduced_data = op(data, partner_data);
+                data = reduced_data;
+            } else {
+                let partner = self.worker_id - worker_offset;
+                log::debug!(
+                    "[Worker {}] Reduce ==> Send message to partner {}",
+                    self.worker_id,
+                    partner,
+                );
+                let msg = Message {
+                    sender_id: self.worker_id,
+                    chunk_id: 0,
+                    num_chunks: 1,
+                    counter: 0,
+                    collective: CollectiveType::Direct,
+                    data: data.into(),
+                };
+                self.send_message(partner, msg).await?;
+
+                return Ok(None);
+            }
+        }
+
+        Ok(Some(data))
+    }
+
     pub fn info(&self) -> BurstInfo {
         BurstInfo {
             burst_id: self.options.burst_id.clone(),
