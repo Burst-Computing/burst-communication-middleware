@@ -1,6 +1,7 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, MiddlewareActorHandle, RabbitMQMImpl, RabbitMQOptions,
-    RedisListImpl, RedisListOptions, S3Impl, S3Options, TokioChannelImpl, TokioChannelOptions,
+    BurstMiddleware, BurstOptions, Middleware, MiddlewareActorHandle, RabbitMQMImpl,
+    RabbitMQOptions, RedisListImpl, RedisListOptions, S3Impl, S3Options, TokioChannelImpl,
+    TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -10,6 +11,21 @@ use std::{
     thread::{self, JoinHandle},
     vec,
 };
+
+#[derive(Debug)]
+struct Str(String);
+
+impl From<Bytes> for Str {
+    fn from(bytes: Bytes) -> Self {
+        Str(String::from_utf8_lossy(&bytes).to_string())
+    }
+}
+
+impl From<Str> for Bytes {
+    fn from(val: Str) -> Self {
+        Bytes::from(val.0)
+    }
+}
 
 fn handle_group(
     group_id: String,
@@ -47,15 +63,14 @@ fn handle_group(
     let mut proxies = tokio_runtime.block_on(fut).unwrap().unwrap();
     let proxy = proxies.remove(&worker_id).unwrap();
 
-    let actor = MiddlewareActorHandle::new(proxy, &tokio_runtime);
+    let actor = Middleware::new(proxy, tokio_runtime.handle().clone());
 
-    let thread = thread::spawn(move || {
-        let worker_id = actor.info.worker_id;
+    thread::spawn(move || {
+        let worker_id = actor.info().worker_id;
         info!("thread start: id={}", worker_id);
         worker(actor);
         info!("thread end: id={}", worker_id);
-    });
-    return thread;
+    })
 }
 
 fn main() {
@@ -82,13 +97,13 @@ fn main() {
     g2.join().unwrap();
 }
 
-fn worker(burst_middleware: MiddlewareActorHandle) {
+fn worker(burst_middleware: Middleware) {
+    let burst_middleware = burst_middleware.get_actor_handle();
     info!("hi im worker with id={}", burst_middleware.info.worker_id);
     if burst_middleware.info.worker_id == 0 {
         info!("worker {} sending message", burst_middleware.info.worker_id);
-        let message = "hello world".to_string();
-        let payload = Bytes::from(message);
-        burst_middleware.send(1, payload).unwrap();
+        let message = Str("hello world".to_string());
+        burst_middleware.send(1, message).unwrap();
 
         info!(
             "worker {} waiting for response...",
@@ -109,13 +124,12 @@ fn worker(burst_middleware: MiddlewareActorHandle) {
             "worker {} received message: {:?}",
             burst_middleware.info.worker_id, message
         );
-        let response = "bye!".to_string();
-        let payload = Bytes::from(response);
+        let response = Str("bye!".to_string());
         info!(
             "worker {} sending response",
             burst_middleware.info.worker_id
         );
-        burst_middleware.send(0, payload).unwrap();
+        burst_middleware.send(0, response).unwrap();
         info!("worker {} done!", burst_middleware.info.worker_id);
     }
 }

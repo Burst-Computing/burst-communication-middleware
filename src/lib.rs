@@ -13,11 +13,13 @@ mod utils;
 
 pub use actor::*;
 pub use burst_message_relay::*;
+use bytes::Bytes;
 pub use middleware::*;
 pub use rabbitmq::*;
 pub use redis_list::*;
 pub use redis_stream::*;
 pub use s3::*;
+use tokio::runtime::{Handle, Runtime};
 pub use tokio_channel::*;
 pub use types::*;
 
@@ -63,10 +65,32 @@ pub enum Backend {
     MessageRelay,
 }
 
-pub fn create_actors(
-    conf: Config,
-    tokio_runtime: &tokio::runtime::Runtime,
-) -> Result<HashMap<u32, MiddlewareActorHandle>> {
+pub struct Middleware {
+    middleware: BurstMiddleware,
+    runtime: Handle,
+}
+
+impl Middleware {
+    pub fn new(middleware: BurstMiddleware, runtime: Handle) -> Self {
+        Self {
+            middleware,
+            runtime,
+        }
+    }
+
+    pub fn get_actor_handle<T>(self) -> MiddlewareActorHandle<T>
+    where
+        T: From<Bytes> + Into<Bytes> + Sync + Send + 'static,
+    {
+        MiddlewareActorHandle::new(self.middleware, &self.runtime)
+    }
+
+    pub fn info(&self) -> BurstInfo {
+        self.middleware.info()
+    }
+}
+
+pub fn create_actors(conf: Config, tokio_runtime: &Runtime) -> Result<HashMap<u32, Middleware>> {
     let burst_options = BurstOptions::new(
         conf.burst_size,
         conf.group_ranges,
@@ -175,9 +199,11 @@ pub fn create_actors(
 
     Ok(actors?
         .into_iter()
-        .map(|(id, proxy)| {
-            let actor = MiddlewareActorHandle::new(proxy, tokio_runtime);
-            (id, actor)
+        .map(|(worker_id, middleware)| {
+            (
+                worker_id,
+                Middleware::new(middleware, tokio_runtime.handle().clone()),
+            )
         })
-        .collect::<HashMap<u32, MiddlewareActorHandle>>())
+        .collect())
 }

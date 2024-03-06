@@ -1,9 +1,9 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, Message, MiddlewareActorHandle, RabbitMQMImpl, RabbitMQOptions,
-    RedisListImpl, RedisListOptions, RedisStreamImpl, RedisStreamOptions, S3Impl, S3Options,
-    TokioChannelImpl, TokioChannelOptions,
+    BurstMiddleware, BurstOptions, Message, Middleware, MiddlewareActorHandle, RabbitMQMImpl,
+    RabbitMQOptions, RedisListImpl, RedisListOptions, RedisStreamImpl, RedisStreamOptions, S3Impl,
+    S3Options, TokioChannelImpl, TokioChannelOptions,
 };
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use log::{error, info};
 use std::{
     collections::{HashMap, HashSet},
@@ -13,6 +13,30 @@ use std::{
 const BURST_SIZE: u32 = 128;
 const GROUPS: u32 = 16;
 const PAYLOAD_SIZE: usize = 4 * 1024 * 1024; // 4MB
+
+#[derive(Debug)]
+struct Msg(Vec<u32>);
+
+impl From<Bytes> for Msg {
+    fn from(bytes: Bytes) -> Self {
+        let mut vec = Vec::new();
+        for i in (0..bytes.len()).step_by(4) {
+            let value = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+            vec.push(value);
+        }
+        Msg(vec)
+    }
+}
+
+impl From<Msg> for Bytes {
+    fn from(msg: Msg) -> Self {
+        let mut bytes = BytesMut::with_capacity(msg.0.len() * 4);
+        for value in msg.0 {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.freeze()
+    }
+}
 
 fn main() {
     env_logger::init();
@@ -76,10 +100,12 @@ fn main() {
         let actors = proxies
             .into_iter()
             .map(|(worker_id, middleware)| {
-                let actor = MiddlewareActorHandle::new(middleware, &tokio_runtime);
-                (worker_id, actor)
+                (
+                    worker_id,
+                    Middleware::new(middleware, tokio_runtime.handle().clone()),
+                )
             })
-            .collect::<HashMap<u32, MiddlewareActorHandle>>();
+            .collect::<HashMap<u32, Middleware>>();
 
         let group_threads = group(actors);
         threads.extend(group_threads);
@@ -90,7 +116,7 @@ fn main() {
     }
 }
 
-fn group(proxies: HashMap<u32, MiddlewareActorHandle>) -> Vec<std::thread::JoinHandle<()>> {
+fn group(proxies: HashMap<u32, Middleware>) -> Vec<std::thread::JoinHandle<()>> {
     let mut threads = Vec::with_capacity(proxies.len());
     for (worker_id, proxy) in proxies {
         let thread = thread::spawn(move || {
@@ -101,23 +127,21 @@ fn group(proxies: HashMap<u32, MiddlewareActorHandle>) -> Vec<std::thread::JoinH
         threads.push(thread);
     }
 
-    return threads;
+    threads
 }
 
-fn worker(burst_middleware: MiddlewareActorHandle) {
+fn worker(burst_middleware: Middleware) {
+    let burst_middleware = burst_middleware.get_actor_handle();
     // let msg = format!("hello from worker {}", burst_middleware.info.worker_id);
     // let data = Bytes::from(msg);
-    let data = Bytes::from(vec![0; PAYLOAD_SIZE]);
+    let data = Msg((0..PAYLOAD_SIZE as u32 / 4).collect());
 
-    match burst_middleware.gather(data, 0).unwrap() {
-        Some(msgs) => {
-            for msg in msgs {
-                info!(
-                    "worker {} received message: {:?}",
-                    burst_middleware.info.worker_id, msg
-                );
-            }
+    if let Some(msgs) = burst_middleware.gather(data, 0).unwrap() {
+        for msg in msgs {
+            info!(
+                "worker {} received message: {:?}",
+                burst_middleware.info.worker_id, msg
+            );
         }
-        None => {}
     }
 }

@@ -214,7 +214,10 @@ impl BurstMiddleware {
         }
     }
 
-    pub async fn send(&mut self, dest: u32, data: Bytes) -> Result<()> {
+    pub async fn send<T>(&mut self, dest: u32, data: T) -> Result<()>
+    where
+        T: Into<Bytes>,
+    {
         let counter = Self::get_counter(&self.send_counters, &dest)?;
         let msg = Message {
             sender_id: self.worker_id,
@@ -222,24 +225,30 @@ impl BurstMiddleware {
             num_chunks: 1,
             counter,
             collective: CollectiveType::Direct,
-            data,
+            data: data.into(),
         };
         self.send_message(dest, msg).await?;
         Self::increment_counter(&mut self.send_counters, &dest)?;
         Ok(())
     }
 
-    pub async fn recv(&mut self, from: u32) -> Result<Message> {
+    pub async fn recv<T>(&mut self, from: u32) -> Result<T>
+    where
+        T: From<Bytes>,
+    {
         // let counter = self.get_counter(&CollectiveType::Direct);
         let counter = Self::get_counter(&self.receive_counters, &from)?;
         let msg = self
             .get_message(from, &CollectiveType::Direct, counter)
             .await?;
         Self::increment_counter(&mut self.receive_counters, &from)?;
-        Ok(msg)
+        Ok(T::from(msg.data))
     }
 
-    pub async fn broadcast(&mut self, data: Option<Bytes>, root: u32) -> Result<Message> {
+    pub async fn broadcast<T>(&mut self, data: Option<T>, root: u32) -> Result<T>
+    where
+        T: Into<Bytes> + From<Bytes>,
+    {
         let counter = Self::get_counter(&self.collective_counters, &CollectiveType::Broadcast)?;
 
         if self.worker_id == root {
@@ -252,7 +261,7 @@ impl BurstMiddleware {
                 num_chunks: 1,
                 counter,
                 collective: CollectiveType::Broadcast,
-                data,
+                data: data.into(),
             };
 
             // Send the message to the local channel for the local group
@@ -293,10 +302,13 @@ impl BurstMiddleware {
         // Increment broadcast counter
         Self::increment_counter(&mut self.collective_counters, &CollectiveType::Broadcast)?;
 
-        Ok(msg)
+        Ok(T::from(msg.data))
     }
 
-    pub async fn gather(&mut self, data: Bytes, root: u32) -> Result<Option<Vec<Message>>> {
+    pub async fn gather<T>(&mut self, data: T, root: u32) -> Result<Option<Vec<T>>>
+    where
+        T: Into<Bytes> + From<Bytes>,
+    {
         let counter = Self::get_counter(&self.collective_counters, &CollectiveType::Gather)?;
 
         let mut result: Option<Vec<Message>> = None;
@@ -306,7 +318,7 @@ impl BurstMiddleware {
             num_chunks: 1,
             counter,
             collective: CollectiveType::Gather,
-            data,
+            data: data.into(),
         };
 
         if self.worker_id == root {
@@ -331,10 +343,13 @@ impl BurstMiddleware {
         }
 
         Self::increment_counter(&mut self.collective_counters, &CollectiveType::Gather)?;
-        Ok(result)
+        Ok(result.map(|msgs| msgs.into_iter().map(|msg| T::from(msg.data)).collect()))
     }
 
-    pub async fn scatter(&mut self, data: Option<Vec<Bytes>>, root: u32) -> Result<Message> {
+    pub async fn scatter<T>(&mut self, data: Option<Vec<T>>, root: u32) -> Result<T>
+    where
+        T: Into<Bytes> + From<Bytes>,
+    {
         let counter = Self::get_counter(&self.collective_counters, &CollectiveType::Scatter)?;
 
         let result: Message;
@@ -345,16 +360,18 @@ impl BurstMiddleware {
                 return Err("Data size must be equal to burst size".into());
             }
 
+            let bytes = data.into_iter().map(|d| d.into()).collect::<Vec<Bytes>>();
+
             result = Message {
                 sender_id: root,
                 chunk_id: 0,
                 num_chunks: 1,
                 counter,
                 collective: CollectiveType::Scatter,
-                data: data[root as usize].clone(),
+                data: bytes[root as usize].clone(),
             };
 
-            let messages = data
+            let messages = bytes
                 .into_iter()
                 .enumerate()
                 .filter(|(to, _)| *to != root as usize)
@@ -382,10 +399,13 @@ impl BurstMiddleware {
 
         // Increment scatter counter
         Self::increment_counter(&mut self.collective_counters, &CollectiveType::Scatter)?;
-        Ok(result)
+        Ok(T::from(result.data))
     }
 
-    pub async fn all_to_all(&mut self, data: Vec<Bytes>) -> Result<Vec<Message>> {
+    pub async fn all_to_all<T>(&mut self, data: Vec<T>) -> Result<Vec<T>>
+    where
+        T: Into<Bytes> + From<Bytes>,
+    {
         let counter = Self::get_counter(&self.collective_counters, &CollectiveType::AllToAll)?;
 
         if data.len() != (self.options.burst_size as usize) {
@@ -405,7 +425,7 @@ impl BurstMiddleware {
                         num_chunks: 1,
                         counter,
                         collective: CollectiveType::Scatter,
-                        data,
+                        data: data.into(),
                     },
                 )
             })
@@ -426,7 +446,10 @@ impl BurstMiddleware {
 
         // Increment all_to_all counter
         Self::increment_counter(&mut self.collective_counters, &CollectiveType::AllToAll)?;
-        Ok(received_messages)
+        Ok(received_messages
+            .into_iter()
+            .map(|msg| T::from(msg.data))
+            .collect())
     }
 
     pub fn info(&self) -> BurstInfo {
