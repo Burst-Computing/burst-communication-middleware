@@ -31,7 +31,16 @@ impl BytesMutChunkedMessageBody {
 
         self.bytes_written += chunk.len();
         let chunk_buff = &mut self.chunked_buffs[chunk_id as usize];
-        chunk_buff.copy_from_slice(chunk.as_ref());
+        if chunk.len() != chunk_buff.len() {
+            // Chunk is smaller than the buffer size and copy_from_slice requires both slices to be the same size
+            // Copy the chunk into a new buffer with the desired size, with zero-paddin, and then copy that buffer into the chunk buffer
+            let mut rechunk = BytesMut::with_capacity(chunk_buff.len());
+            rechunk.extend_from_slice(chunk.as_ref());
+            rechunk.resize(chunk_buff.len(), 0);
+            chunk_buff.copy_from_slice(&rechunk);
+        } else {
+            chunk_buff.copy_from_slice(chunk.as_ref());
+        }
 
         self.num_chunks_stored += 1;
         log::debug!(
