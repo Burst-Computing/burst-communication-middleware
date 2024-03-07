@@ -12,8 +12,8 @@ use std::{
     thread,
 };
 
-const BURST_SIZE: u32 = 128;
-const GROUPS: u32 = 16;
+const BURST_SIZE: u32 = 8;
+const GROUPS: u32 = 4;
 
 fn main() {
     env_logger::init();
@@ -142,6 +142,6 @@ fn worker(mut burst_middleware: BurstMiddleware) {
         .unwrap();
 
     if let Some(res) = res {
-        info!("Reduced value is {:?}", res);
+        info!("----------> Reduced value is {:?} <----------", res);
     }
 }
