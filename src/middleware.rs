@@ -404,7 +404,7 @@ impl BurstMiddleware {
                         chunk_id: 0,
                         num_chunks: 1,
                         counter,
-                        collective: CollectiveType::Scatter,
+                        collective: CollectiveType::AllToAll,
                         data,
                     },
                 )
