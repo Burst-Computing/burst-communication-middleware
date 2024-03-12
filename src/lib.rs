@@ -1,7 +1,7 @@
 mod actor;
 mod burst_message_relay;
 mod chunk_store;
-mod message_store;
+mod message_buffer;
 mod middleware;
 mod rabbitmq;
 mod redis_list;

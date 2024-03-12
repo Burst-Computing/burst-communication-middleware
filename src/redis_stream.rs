@@ -11,8 +11,9 @@ use redis::{
 };
 
 use crate::{
-    impl_chainable_setter, BroadcastProxy, BroadcastReceiveProxy, BroadcastSendProxy, BurstOptions,
-    Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BurstOptions, RemoteBroadcastProxy, RemoteBroadcastReceiveProxy,
+    RemoteBroadcastSendProxy, RemoteMessage, RemoteReceiveProxy, RemoteSendProxy,
+    RemoteSendReceiveFactory, RemoteSendReceiveProxy, Result,
 };
 
 #[derive(Clone, Debug)]
@@ -52,11 +53,19 @@ impl Default for RedisStreamOptions {
 pub struct RedisStreamImpl;
 
 #[async_trait]
-impl SendReceiveFactory<RedisStreamOptions> for RedisStreamImpl {
-    async fn create_proxies(
+impl RemoteSendReceiveFactory<RedisStreamOptions> for RedisStreamImpl {
+    async fn create_remote_proxies(
         burst_options: Arc<BurstOptions>,
         redis_options: RedisStreamOptions,
-    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>> {
+    ) -> Result<
+        HashMap<
+            u32,
+            (
+                Box<dyn RemoteSendReceiveProxy>,
+                Box<dyn RemoteBroadcastProxy>,
+            ),
+        >,
+    > {
         let redis_options = Arc::new(redis_options);
         // create redis pool with deadpool
         let group_size = burst_options
@@ -99,8 +108,8 @@ impl SendReceiveFactory<RedisStreamOptions> for RedisStreamImpl {
             proxies.insert(
                 proxy.worker_id,
                 (
-                    Box::new(proxy) as Box<dyn SendReceiveProxy>,
-                    Box::new(broadcast_proxy) as Box<dyn BroadcastProxy>,
+                    Box::new(proxy) as Box<dyn RemoteSendReceiveProxy>,
+                    Box::new(broadcast_proxy) as Box<dyn RemoteBroadcastProxy>,
                 ),
             );
         });
@@ -113,8 +122,8 @@ impl SendReceiveFactory<RedisStreamOptions> for RedisStreamImpl {
 
 pub struct RedisStreamProxy {
     worker_id: u32,
-    receiver: Box<dyn ReceiveProxy>,
-    sender: Box<dyn SendProxy>,
+    receiver: Box<dyn RemoteReceiveProxy>,
+    sender: Box<dyn RemoteSendProxy>,
 }
 
 pub struct RedisStreamSendProxy {
@@ -132,19 +141,19 @@ pub struct RedisStreamReceiveProxy {
     stream_ids: DashMap<u32, String>,
 }
 
-impl SendReceiveProxy for RedisStreamProxy {}
+impl RemoteSendReceiveProxy for RedisStreamProxy {}
 
 #[async_trait]
-impl SendProxy for RedisStreamProxy {
-    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
-        self.sender.send(dest, msg).await
+impl RemoteSendProxy for RedisStreamProxy {
+    async fn remote_send(&self, dest: u32, msg: RemoteMessage) -> Result<()> {
+        self.sender.remote_send(dest, msg).await
     }
 }
 
 #[async_trait]
-impl ReceiveProxy for RedisStreamProxy {
-    async fn recv(&self, source: u32) -> Result<Message> {
-        self.receiver.recv(source).await
+impl RemoteReceiveProxy for RedisStreamProxy {
+    async fn remote_recv(&self, source: u32) -> Result<RemoteMessage> {
+        self.receiver.remote_recv(source).await
     }
 }
 
@@ -174,8 +183,8 @@ impl RedisStreamProxy {
 }
 
 #[async_trait]
-impl SendProxy for RedisStreamSendProxy {
-    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
+impl RemoteSendProxy for RedisStreamSendProxy {
+    async fn remote_send(&self, dest: u32, msg: RemoteMessage) -> Result<()> {
         let con = self.redis_pool.get().await?;
         Ok(send_direct(
             con,
@@ -206,9 +215,12 @@ impl RedisStreamSendProxy {
 }
 
 #[async_trait]
-impl ReceiveProxy for RedisStreamReceiveProxy {
-    async fn recv(&self, source: u32) -> Result<Message> {
-        log::debug!("[Redis Stream] Getting message from source {}", source);
+impl RemoteReceiveProxy for RedisStreamReceiveProxy {
+    async fn remote_recv(&self, source: u32) -> Result<RemoteMessage> {
+        log::debug!(
+            "[Redis Stream] Getting RemoteMessage from source {}",
+            source
+        );
         let last_id = match self.stream_ids.get(&source) {
             Some(id) => id.value().clone(),
             None => "0".to_string(),
@@ -230,7 +242,7 @@ impl ReceiveProxy for RedisStreamReceiveProxy {
         self.stream_ids.insert(source, new_last_id);
 
         let msg = deserialize_stream_reply(reply)?;
-        // log::debug!("[Redis Stream] Got message {:?}", msg);
+        // log::debug!("[Redis Stream] Got RemoteMessage {:?}", msg);
         Ok(msg)
     }
 }
@@ -256,8 +268,8 @@ impl RedisStreamReceiveProxy {
 // BROADCAST PROXIES
 
 pub struct RedisStreamBroadcastProxy {
-    broadcast_sender: Box<dyn BroadcastSendProxy>,
-    broadcast_receiver: Box<dyn BroadcastReceiveProxy>,
+    broadcast_sender: Box<dyn RemoteBroadcastSendProxy>,
+    broadcast_receiver: Box<dyn RemoteBroadcastReceiveProxy>,
 }
 
 pub struct RedisStreamBroadcastSendProxy {
@@ -272,7 +284,7 @@ pub struct RedisStreamBroadcastReceiveProxy {
     broadcast_stream_id: Mutex<String>,
 }
 
-impl BroadcastProxy for RedisStreamBroadcastProxy {}
+impl RemoteBroadcastProxy for RedisStreamBroadcastProxy {}
 
 impl RedisStreamBroadcastProxy {
     pub async fn new(
@@ -300,22 +312,22 @@ impl RedisStreamBroadcastProxy {
 }
 
 #[async_trait]
-impl BroadcastSendProxy for RedisStreamBroadcastProxy {
-    async fn broadcast_send(&self, msg: Message) -> Result<()> {
+impl RemoteBroadcastSendProxy for RedisStreamBroadcastProxy {
+    async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
         self.broadcast_sender.broadcast_send(msg).await
     }
 }
 
 #[async_trait]
-impl BroadcastReceiveProxy for RedisStreamBroadcastProxy {
-    async fn broadcast_recv(&self) -> Result<Message> {
+impl RemoteBroadcastReceiveProxy for RedisStreamBroadcastProxy {
+    async fn remote_broadcast_recv(&self) -> Result<RemoteMessage> {
         self.broadcast_receiver.broadcast_recv().await
     }
 }
 
 #[async_trait]
-impl BroadcastSendProxy for RedisStreamBroadcastSendProxy {
-    async fn broadcast_send(&self, msg: Message) -> Result<()> {
+impl RemoteBroadcastSendProxy for RedisStreamBroadcastSendProxy {
+    async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
         let msg = &msg;
         futures::future::try_join_all(
             self.burst_options
@@ -352,8 +364,8 @@ impl RedisStreamBroadcastSendProxy {
 }
 
 #[async_trait]
-impl BroadcastReceiveProxy for RedisStreamBroadcastReceiveProxy {
-    async fn broadcast_recv(&self) -> Result<Message> {
+impl RemoteBroadcastReceiveProxy for RedisStreamBroadcastReceiveProxy {
+    async fn remote_broadcast_recv(&self) -> Result<RemoteMessage> {
         let mut con = self.redis_pool.get().await?;
         let mut last_id = self.broadcast_stream_id.lock().await;
         let (new_last_id, stream_reply) = read_stream(&mut con, &self.broadcast_recv_key, &last_id)
@@ -389,7 +401,7 @@ impl RedisStreamBroadcastReceiveProxy {
 
 async fn send_direct<C>(
     connection: C,
-    msg: Message,
+    msg: RemoteMessage,
     source: u32,
     dest: u32,
     redis_options: &RedisStreamOptions,
@@ -413,7 +425,7 @@ where
 
 async fn send_broadcast(
     pool: &Pool,
-    msg: &Message,
+    msg: &RemoteMessage,
     dest: &str,
     redis_options: &RedisStreamOptions,
     burst_options: &BurstOptions,
@@ -431,11 +443,11 @@ async fn send_broadcast(
     .await
 }
 
-async fn send_redis<C>(mut connection: C, msg: &Message, key: &str) -> Result<()>
+async fn send_redis<C>(mut connection: C, msg: &RemoteMessage, key: &str) -> Result<()>
 where
     C: ConnectionLike + Send,
 {
-    log::debug!("[Redis Stream] Adding message to stream {}", key);
+    log::debug!("[Redis Stream] Adding RemoteMessage to stream {}", key);
     let data: [&[u8]; 2] = msg.into();
     connection
         .xadd(key, "*", &[("h", data[0]), ("p", data[1])])
@@ -476,7 +488,7 @@ where
     Ok((last_id, reply))
 }
 
-fn deserialize_stream_reply(reply: StreamReadReply) -> Result<Message> {
+fn deserialize_stream_reply(reply: StreamReadReply) -> Result<RemoteMessage> {
     let mut reply_map = reply
         .keys
         .into_iter()
@@ -495,7 +507,7 @@ fn deserialize_stream_reply(reply: StreamReadReply) -> Result<Message> {
         redis::Value::Data(d) => d,
         _ => panic!("Expected payload to be a redis::Value::Data"),
     };
-    Ok(Message::from((header, payload)))
+    Ok(RemoteMessage::from((header, payload)))
 }
 
 fn get_direct_stream_name(

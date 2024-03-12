@@ -1,30 +1,31 @@
 use crate::{
     chunk_store::BytesMutChunkedMessageBody,
-    types::{CollectiveType, Message},
+    types::{CollectiveType, LocalMessage, RemoteMessage},
+    MessageMetadata,
 };
 use std::collections::hash_map;
 use std::collections::HashMap;
 
-type WorkerCollectiveCounter = (u32, CollectiveType, u32);
+type MessageKey = (u32, CollectiveType, u32); // (sender_id, collective, counter)
 
-pub struct MessageStore {
-    messages: HashMap<WorkerCollectiveCounter, BytesMutChunkedMessageBody>,
+pub struct RemoteMessageBuffer {
+    buffer: HashMap<MessageKey, BytesMutChunkedMessageBody>,
     chunk_size: usize,
 }
 
-impl MessageStore {
+impl RemoteMessageBuffer {
     pub fn new(chunk_size: usize) -> Self {
-        MessageStore {
-            messages: HashMap::new(),
+        RemoteMessageBuffer {
+            buffer: HashMap::new(),
             chunk_size,
         }
     }
 
-    pub fn insert(&mut self, msg: Message) {
+    pub fn insert(&mut self, msg: RemoteMessage) {
         let chunk_id = msg.chunk_id;
 
         if let hash_map::Entry::Vacant(e) =
-            self.messages
+            self.buffer
                 .entry((msg.sender_id, msg.collective, msg.counter))
         {
             let mut message_body = BytesMutChunkedMessageBody::new(msg.num_chunks, self.chunk_size);
@@ -32,7 +33,7 @@ impl MessageStore {
             e.insert(message_body);
         } else {
             let message_body = self
-                .messages
+                .buffer
                 .get_mut(&(msg.sender_id, msg.collective, msg.counter))
                 .unwrap();
             message_body.insert(chunk_id, msg.data);
@@ -44,22 +45,24 @@ impl MessageStore {
         sender_id: &u32,
         collective: &CollectiveType,
         counter: &u32,
-    ) -> Option<Message> {
+    ) -> Option<RemoteMessage> {
         let key = (*sender_id, *collective, *counter);
-        let is_complete = match self.messages.get(&key) {
+        let is_complete = match self.buffer.get(&key) {
             Some(chunk_store) => chunk_store.is_complete(),
             None => false,
         };
 
         if is_complete {
-            let chunk_store = self.messages.remove(&key).unwrap();
+            let chunk_store = self.buffer.remove(&key).unwrap();
             let body = chunk_store.get_complete_body();
-            Some(Message {
-                sender_id: *sender_id,
-                chunk_id: 0,
-                num_chunks: 1,
-                counter: *counter,
-                collective: *collective,
+            Some(RemoteMessage {
+                metadata: MessageMetadata {
+                    sender_id: *sender_id,
+                    chunk_id: 0,
+                    num_chunks: 1,
+                    counter: *counter,
+                    collective: *collective,
+                },
                 data: body,
             })
         } else {
@@ -73,8 +76,34 @@ impl MessageStore {
         collective: &CollectiveType,
         counter: &u32,
     ) -> Option<u32> {
-        self.messages
+        self.buffer
             .get(&(*sender_id, *collective, *counter))
             .map(|chunk_store| chunk_store.get_num_chunks_stored())
+    }
+}
+
+pub struct LocalMessageBuffer<T> {
+    buffer: HashMap<MessageKey, LocalMessage<T>>,
+}
+
+impl<T> LocalMessageBuffer<T> {
+    pub fn new() -> Self {
+        LocalMessageBuffer {
+            buffer: HashMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, msg: LocalMessage<T>) {
+        self.buffer
+            .insert((msg.sender_id, msg.collective, msg.counter), msg);
+    }
+
+    pub fn get(
+        &mut self,
+        sender_id: &u32,
+        collective: &CollectiveType,
+        counter: &u32,
+    ) -> Option<LocalMessage<T>> {
+        self.buffer.remove((sender_id, collective, counter))
     }
 }

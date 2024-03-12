@@ -17,8 +17,9 @@ use lapin::{
 use uuid::Uuid;
 
 use crate::{
-    impl_chainable_setter, BroadcastProxy, BroadcastReceiveProxy, BroadcastSendProxy, BurstOptions,
-    Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BurstOptions, MessageMetadata, RemoteBroadcastProxy,
+    RemoteBroadcastReceiveProxy, RemoteBroadcastSendProxy, RemoteMessage, RemoteReceiveProxy,
+    RemoteSendProxy, RemoteSendReceiveFactory, RemoteSendReceiveProxy, Result,
 };
 
 #[derive(Clone, Debug)]
@@ -76,11 +77,19 @@ impl Default for RabbitMQOptions {
 pub struct RabbitMQMImpl;
 
 #[async_trait]
-impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
-    async fn create_proxies(
+impl RemoteSendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
+    async fn create_remote_proxies(
         burst_options: Arc<BurstOptions>,
         rabbitmq_options: RabbitMQOptions,
-    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>> {
+    ) -> Result<
+        HashMap<
+            u32,
+            (
+                Box<dyn RemoteSendReceiveProxy>,
+                Box<dyn RemoteBroadcastProxy>,
+            ),
+        >,
+    > {
         let rabbitmq_options = Arc::new(rabbitmq_options);
 
         let current_group = burst_options
@@ -113,9 +122,10 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
                 let proxy = RabbitMQProxy::new(r.clone(), b.clone(), *worker_id, p.clone())
                     .await
                     .unwrap();
-                let broadcast_proxy = RabbitMQBroadcastProxy::new(r.clone(), b.clone(), p.clone())
-                    .await
-                    .unwrap();
+                let broadcast_proxy =
+                    RabbitMQRemoteBroadcastProxy::new(r.clone(), b.clone(), p.clone())
+                        .await
+                        .unwrap();
                 Ok::<_, lapin::Error>((*worker_id, proxy, broadcast_proxy))
             }
         }))
@@ -125,8 +135,8 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
             proxies.insert(
                 worker_id,
                 (
-                    Box::new(proxy) as Box<dyn SendReceiveProxy>,
-                    Box::new(broadcast_proxy) as Box<dyn BroadcastProxy>,
+                    Box::new(proxy) as Box<dyn RemoteSendReceiveProxy>,
+                    Box::new(broadcast_proxy) as Box<dyn RemoteBroadcastProxy>,
                 ),
             );
         });
@@ -138,8 +148,8 @@ impl SendReceiveFactory<RabbitMQOptions> for RabbitMQMImpl {
 // DIRECT PROXIES
 
 pub struct RabbitMQProxy {
-    sender: Box<dyn SendProxy>,
-    receiver: Box<dyn ReceiveProxy>,
+    sender: Box<dyn RemoteSendProxy>,
+    receiver: Box<dyn RemoteReceiveProxy>,
 }
 
 pub struct RabbitMQSendProxy {
@@ -153,19 +163,19 @@ pub struct RabbitMQReceiveProxy {
     consumer: Consumer,
 }
 
-impl SendReceiveProxy for RabbitMQProxy {}
+impl RemoteSendReceiveProxy for RabbitMQProxy {}
 
 #[async_trait]
-impl SendProxy for RabbitMQProxy {
-    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
-        self.sender.send(dest, msg).await
+impl RemoteSendProxy for RabbitMQProxy {
+    async fn remote_send(&self, dest: u32, msg: RemoteMessage) -> Result<()> {
+        self.sender.remote_send(dest, msg).await
     }
 }
 
 #[async_trait]
-impl ReceiveProxy for RabbitMQProxy {
-    async fn recv(&self, source: u32) -> Result<Message> {
-        self.receiver.recv(source).await
+impl RemoteReceiveProxy for RabbitMQProxy {
+    async fn remote_recv(&self, source: u32) -> Result<RemoteMessage> {
+        self.receiver.remote_recv(source).await
     }
 }
 
@@ -193,8 +203,8 @@ impl RabbitMQProxy {
 }
 
 #[async_trait]
-impl SendProxy for RabbitMQSendProxy {
-    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
+impl RemoteSendProxy for RabbitMQSendProxy {
+    async fn remote_send(&self, dest: u32, msg: RemoteMessage) -> Result<()> {
         send_direct(
             &self.pool,
             &msg,
@@ -221,10 +231,10 @@ impl RabbitMQSendProxy {
 }
 
 #[async_trait]
-impl ReceiveProxy for RabbitMQReceiveProxy {
-    async fn recv(&self, _source: u32) -> Result<Message> {
+impl RemoteReceiveProxy for RabbitMQReceiveProxy {
+    async fn remote_recv(&self, _source: u32) -> Result<RemoteMessage> {
         let delivery = self.consumer.clone().try_next().await?;
-        let delivery = delivery.ok_or("No message received")?;
+        let delivery = delivery.ok_or("No RemoteMessage received")?;
         log::debug!(
             "RabbitMQ Basic consume, routing key: {:?}, exchange: {:?}",
             delivery.routing_key,
@@ -233,7 +243,7 @@ impl ReceiveProxy for RabbitMQReceiveProxy {
         if self.rabbitmq_options.ack {
             delivery.ack(BasicAckOptions::default()).await?;
         }
-        Ok(parse_message_from_delivery(delivery))
+        Ok(parse_delivery(delivery))
     }
 }
 
@@ -272,25 +282,25 @@ impl RabbitMQReceiveProxy {
 
 // BROADCAST PROXIES
 
-pub struct RabbitMQBroadcastProxy {
-    broadcast_sender: Box<dyn BroadcastSendProxy>,
-    broadcast_receiver: Box<dyn BroadcastReceiveProxy>,
+pub struct RabbitMQRemoteBroadcastProxy {
+    broadcast_sender: Box<dyn RemoteBroadcastSendProxy>,
+    broadcast_receiver: Box<dyn RemoteBroadcastReceiveProxy>,
 }
 
-pub struct RabbitMQBroadcastSendProxy {
+pub struct RabbitMQRemoteBroadcastSendProxy {
     pool: Pool,
     rabbitmq_options: Arc<RabbitMQOptions>,
     burst_options: Arc<BurstOptions>,
 }
 
-pub struct RabbitMQBroadcastReceiveProxy {
+pub struct RabbitMQRemoteBroadcastReceiveProxy {
     rabbitmq_options: Arc<RabbitMQOptions>,
     consumer: Consumer,
 }
 
-impl BroadcastProxy for RabbitMQBroadcastProxy {}
+impl RemoteBroadcastProxy for RabbitMQRemoteBroadcastProxy {}
 
-impl RabbitMQBroadcastProxy {
+impl RabbitMQRemoteBroadcastProxy {
     pub async fn new(
         rabbitmq_options: Arc<RabbitMQOptions>,
         burst_options: Arc<BurstOptions>,
@@ -298,7 +308,7 @@ impl RabbitMQBroadcastProxy {
     ) -> Result<Self> {
         Ok(Self {
             broadcast_sender: Box::new(
-                RabbitMQBroadcastSendProxy::new(
+                RabbitMQRemoteBroadcastSendProxy::new(
                     rabbitmq_options.clone(),
                     burst_options.clone(),
                     pool.clone(),
@@ -306,7 +316,7 @@ impl RabbitMQBroadcastProxy {
                 .await?,
             ),
             broadcast_receiver: Box::new(
-                RabbitMQBroadcastReceiveProxy::new(
+                RabbitMQRemoteBroadcastReceiveProxy::new(
                     rabbitmq_options.clone(),
                     burst_options.clone(),
                     pool.clone(),
@@ -318,22 +328,22 @@ impl RabbitMQBroadcastProxy {
 }
 
 #[async_trait]
-impl BroadcastSendProxy for RabbitMQBroadcastProxy {
-    async fn broadcast_send(&self, msg: Message) -> Result<()> {
+impl RemoteBroadcastSendProxy for RabbitMQRemoteBroadcastProxy {
+    async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
         self.broadcast_sender.broadcast_send(msg).await
     }
 }
 
 #[async_trait]
-impl BroadcastReceiveProxy for RabbitMQBroadcastProxy {
-    async fn broadcast_recv(&self) -> Result<Message> {
+impl RemoteBroadcastReceiveProxy for RabbitMQRemoteBroadcastProxy {
+    async fn remote_broadcast_recv(&self) -> Result<RemoteMessage> {
         self.broadcast_receiver.broadcast_recv().await
     }
 }
 
 #[async_trait]
-impl BroadcastSendProxy for RabbitMQBroadcastSendProxy {
-    async fn broadcast_send(&self, msg: Message) -> Result<()> {
+impl RemoteBroadcastSendProxy for RabbitMQRemoteBroadcastSendProxy {
+    async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
         send_broadcast(
             &self.pool,
             &msg,
@@ -344,7 +354,7 @@ impl BroadcastSendProxy for RabbitMQBroadcastSendProxy {
     }
 }
 
-impl RabbitMQBroadcastSendProxy {
+impl RabbitMQRemoteBroadcastSendProxy {
     pub async fn new(
         rabbitmq_options: Arc<RabbitMQOptions>,
         burst_options: Arc<BurstOptions>,
@@ -359,11 +369,11 @@ impl RabbitMQBroadcastSendProxy {
 }
 
 #[async_trait]
-impl BroadcastReceiveProxy for RabbitMQBroadcastReceiveProxy {
-    async fn broadcast_recv(&self) -> Result<Message> {
+impl RemoteBroadcastReceiveProxy for RabbitMQRemoteBroadcastReceiveProxy {
+    async fn remote_broadcast_recv(&self) -> Result<RemoteMessage> {
         // log::debug!("RabbitMQ Basic consume");
         let delivery = self.consumer.clone().try_next().await?;
-        let delivery = delivery.ok_or("No message received")?;
+        let delivery = delivery.ok_or("No RemoteMessage received")?;
         log::debug!(
             "RabbitMQ Basic consume, routing key: {:?}, exchange: {:?}",
             delivery.routing_key,
@@ -372,11 +382,11 @@ impl BroadcastReceiveProxy for RabbitMQBroadcastReceiveProxy {
         if self.rabbitmq_options.ack {
             delivery.ack(BasicAckOptions::default()).await?;
         }
-        Ok(parse_message_from_delivery(delivery))
+        Ok(parse_delivery(delivery))
     }
 }
 
-impl RabbitMQBroadcastReceiveProxy {
+impl RabbitMQRemoteBroadcastReceiveProxy {
     pub async fn new(
         rabbitmq_options: Arc<RabbitMQOptions>,
         burst_options: Arc<BurstOptions>,
@@ -525,7 +535,7 @@ async fn init_rabbit(
 
 async fn send_direct(
     pool: &Pool,
-    msg: &Message,
+    msg: &RemoteMessage,
     dest: u32,
     rabbitmq_options: &RabbitMQOptions,
     burst_options: &BurstOptions,
@@ -548,7 +558,7 @@ async fn send_direct(
 
 async fn send_broadcast(
     pool: &Pool,
-    msg: &Message,
+    msg: &RemoteMessage,
     rabbitmq_options: &RabbitMQOptions,
     burst_options: &BurstOptions,
 ) -> Result<()> {
@@ -578,7 +588,12 @@ async fn send_broadcast(
     .await
 }
 
-async fn send_rabbit(pool: &Pool, msg: &Message, exchange: &str, routing_key: &str) -> Result<()> {
+async fn send_rabbit(
+    pool: &Pool,
+    msg: &RemoteMessage,
+    exchange: &str,
+    routing_key: &str,
+) -> Result<()> {
     let connection = pool.get().await?;
     let channel = connection.create_channel().await?;
 
@@ -624,7 +639,7 @@ fn get_consumer_tag() -> String {
     format!("consumer_{}", Uuid::new_v4())
 }
 
-fn create_headers(msg: &Message) -> FieldTable {
+fn create_headers(msg: &RemoteMessage) -> FieldTable {
     let mut fields = FieldTable::default();
     fields.insert("sender_id".into(), AMQPValue::LongUInt(msg.sender_id));
     fields.insert("chunk_id".into(), AMQPValue::LongUInt(msg.chunk_id));
@@ -637,7 +652,7 @@ fn create_headers(msg: &Message) -> FieldTable {
     fields
 }
 
-fn parse_message_from_delivery(delivery: Delivery) -> Message {
+fn parse_delivery(delivery: Delivery) -> RemoteMessage {
     let data = Bytes::from(delivery.data);
     let map = delivery.properties.headers().as_ref().unwrap().inner();
 
@@ -652,12 +667,14 @@ fn parse_message_from_delivery(delivery: Delivery) -> Message {
         .unwrap()
         .into();
 
-    Message {
-        sender_id,
-        chunk_id,
-        num_chunks,
-        counter,
-        collective,
+    RemoteMessage {
+        metadata: MessageMetadata {
+            sender_id,
+            chunk_id,
+            num_chunks,
+            counter,
+            collective,
+        },
         data,
     }
 }
