@@ -30,23 +30,19 @@ pub trait RemoteReceiveProxy: Send + Sync {
 pub trait RemoteSendReceiveProxy: RemoteSendProxy + RemoteReceiveProxy + Send + Sync {}
 
 #[async_trait]
-pub trait LocalSendProxy: Send + Sync {
-    async fn local_send<T: From<Bytes> + Into<Bytes>>(
-        &self,
-        dest: u32,
-        msg: LocalMessage<T>,
-    ) -> Result<()>;
+pub trait LocalSendProxy<T: From<Bytes> + Into<Bytes>>: Send + Sync {
+    async fn local_send(&self, dest: u32, msg: LocalMessage<T>) -> Result<()>;
 }
 
 #[async_trait]
-pub trait LocalReceiveProxy: Send + Sync {
-    async fn local_recv<T: From<Bytes> + Into<Bytes>>(
-        &self,
-        source: u32,
-    ) -> Result<LocalMessage<T>>;
+pub trait LocalReceiveProxy<T: From<Bytes> + Into<Bytes>>: Send + Sync {
+    async fn local_recv(&self, source: u32) -> Result<LocalMessage<T>>;
 }
 
-pub trait LocalSendReceiveProxy: LocalSendProxy + LocalReceiveProxy + Send + Sync {}
+pub trait LocalSendReceiveProxy<T: From<Bytes> + Into<Bytes>>:
+    LocalSendProxy<T> + LocalReceiveProxy<T> + Send + Sync
+{
+}
 
 #[async_trait]
 pub trait RemoteBroadcastSendProxy: Send + Sync {
@@ -102,7 +98,15 @@ pub trait SendReceiveLocalFactory<T>: Send + Sync {
     async fn create_local_proxies(
         burst_options: Arc<BurstOptions>,
         options: T,
-    ) -> Result<HashMap<u32, (Box<dyn LocalSendReceiveProxy>, Box<dyn LocalBroadcastProxy>)>>;
+    ) -> Result<
+        HashMap<
+            u32,
+            (
+                Box<dyn LocalSendReceiveProxy<T>>,
+                Box<dyn LocalBroadcastProxy>,
+            ),
+        >,
+    >;
 }
 
 #[derive(Clone, Debug)]
@@ -159,7 +163,7 @@ pub struct BurstMiddleware<T> {
     group: HashSet<u32>,
     group_worker_leader: u32,
 
-    local_send_receive: Arc<dyn LocalSendReceiveProxy>,
+    local_send_receive: Arc<dyn LocalSendReceiveProxy<T>>,
     remote_send_receive: Arc<dyn RemoteSendReceiveProxy>,
 
     local_broadcast: Arc<dyn LocalBroadcastProxy>,
@@ -218,7 +222,7 @@ impl<T> BurstMiddleware<T> {
 
     pub fn new(
         options: Arc<BurstOptions>,
-        local_send_receive: Box<dyn LocalSendReceiveProxy>,
+        local_send_receive: Box<dyn LocalSendReceiveProxy<T>>,
         remote_send_receive: Box<dyn RemoteSendReceiveProxy>,
         local_broadcast: Box<dyn LocalBroadcastProxy>,
         remote_broadcast: Box<dyn RemoteBroadcastProxy>,
@@ -288,7 +292,7 @@ impl<T> BurstMiddleware<T> {
             .get_message(from, &CollectiveType::Direct, counter)
             .await?;
         Self::increment_counter(&mut self.receive_counters, &from)?;
-        Ok(msg)
+        Ok(T::from(msg.data))
     }
 
     pub async fn broadcast(&mut self, data: Option<T>, root: u32) -> Result<LocalMessage<T>> {
@@ -348,7 +352,7 @@ impl<T> BurstMiddleware<T> {
         // Increment broadcast counter
         Self::increment_counter(&mut self.collective_counters, &CollectiveType::Broadcast)?;
 
-        Ok(msg)
+        Ok(T::from(msg.data))
     }
 
     pub async fn gather(&mut self, data: T, root: u32) -> Result<Option<Vec<LocalMessage<T>>>> {
@@ -388,7 +392,7 @@ impl<T> BurstMiddleware<T> {
         }
 
         Self::increment_counter(&mut self.collective_counters, &CollectiveType::Gather)?;
-        Ok(result)
+        Ok(result.map(|msgs| msgs.into_iter().map(|msg| T::from(msg.data)).collect()))
     }
 
     pub async fn scatter(&mut self, data: Option<Vec<T>>, root: u32) -> Result<LocalMessage<T>> {
@@ -443,10 +447,10 @@ impl<T> BurstMiddleware<T> {
 
         // Increment scatter counter
         Self::increment_counter(&mut self.collective_counters, &CollectiveType::Scatter)?;
-        Ok(result)
+        Ok(T::from(result.data))
     }
 
-    pub async fn all_to_all(&mut self, data: Vec<Bytes>) -> Result<Vec<LocalMessage<T>>> {
+    pub async fn all_to_all(&mut self, data: Vec<T>) -> Result<Vec<LocalMessage<T>>> {
         let counter = Self::get_counter(&self.collective_counters, &CollectiveType::AllToAll)?;
 
         if data.len() != (self.options.burst_size as usize) {
@@ -489,7 +493,10 @@ impl<T> BurstMiddleware<T> {
 
         // Increment all_to_all counter
         Self::increment_counter(&mut self.collective_counters, &CollectiveType::AllToAll)?;
-        Ok(received_messages)
+        Ok(received_messages
+            .into_iter()
+            .map(|msg| T::from(msg.data))
+            .collect())
     }
 
     pub async fn reduce(&mut self, data: T, op: fn(T, T) -> T) -> Result<Option<T>>
@@ -1024,14 +1031,14 @@ impl<T> BurstMiddleware<T> {
 
     async fn local_recv(
         from: u32,
-        proxy: Arc<dyn LocalSendReceiveProxy>,
+        proxy: Arc<dyn LocalSendReceiveProxy<T>>,
     ) -> (u32, Result<LocalMessage<T>>) {
         (from, proxy.local_recv(from).await)
     }
 
     async fn local_send(
         to: u32,
-        proxy: Arc<dyn LocalSendReceiveProxy>,
+        proxy: Arc<dyn LocalSendReceiveProxy<T>>,
         msg: LocalMessage<T>,
     ) -> Result<()> {
         proxy.local_send(to, msg).await

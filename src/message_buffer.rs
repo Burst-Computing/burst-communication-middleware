@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 use crate::{
     chunk_store::BytesMutChunkedMessageBody,
     types::{CollectiveType, LocalMessage, RemoteMessage},
@@ -82,11 +84,11 @@ impl RemoteMessageBuffer {
     }
 }
 
-pub struct LocalMessageBuffer<T> {
+pub struct LocalMessageBuffer<T: From<Bytes> + Into<Bytes>> {
     buffer: HashMap<MessageKey, LocalMessage<T>>,
 }
 
-impl<T> LocalMessageBuffer<T> {
+impl<T: From<Bytes> + Into<Bytes>> LocalMessageBuffer<T> {
     pub fn new() -> Self {
         LocalMessageBuffer {
             buffer: HashMap::new(),

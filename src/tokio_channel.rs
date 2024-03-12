@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use tokio::sync::{
     broadcast::{Receiver, Sender},
     mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -46,10 +47,18 @@ pub struct TokioChannelImpl;
 
 #[async_trait]
 impl SendReceiveLocalFactory<TokioChannelOptions> for TokioChannelImpl {
-    async fn create_local_proxies(
+    async fn create_local_proxies<T>(
         burst_options: Arc<BurstOptions>,
         channel_options: TokioChannelOptions,
-    ) -> Result<HashMap<u32, (Box<dyn LocalSendReceiveProxy>, Box<dyn LocalBroadcastProxy>)>> {
+    ) -> Result<
+        HashMap<
+            u32,
+            (
+                Box<dyn LocalSendReceiveProxy<T>>,
+                Box<dyn LocalBroadcastProxy>,
+            ),
+        >,
+    > {
         let current_group = burst_options
             .group_ranges
             .get(&burst_options.group_id)
@@ -102,37 +111,37 @@ impl SendReceiveLocalFactory<TokioChannelOptions> for TokioChannelImpl {
 
 // DIRECT PROXIES
 
-pub struct TokioChannelProxy {
+pub struct TokioChannelProxy<T> {
     worker_id: u32,
-    sender: Box<dyn LocalSendProxy>,
-    receiver: Box<dyn LocalReceiveProxy>,
+    sender: Box<dyn LocalSendProxy<T>>,
+    receiver: Box<dyn LocalReceiveProxy<T>>,
 }
 
-pub struct TokioChannelSendProxy<T> {
+pub struct TokioChannelSendProxy<T: From<Bytes> + Into<Bytes>> {
     tx_channels: Arc<HashMap<u32, UnboundedSender<LocalMessage<T>>>>,
 }
 
-pub struct TokioChannelReceiveProxy<T> {
+pub struct TokioChannelReceiveProxy<T: From<Bytes> + Into<Bytes>> {
     rx_channel: Mutex<UnboundedReceiver<LocalMessage<T>>>,
 }
 
-impl LocalSendReceiveProxy for TokioChannelProxy {}
+impl<T: From<Bytes> + Into<Bytes>> LocalSendReceiveProxy<T> for TokioChannelProxy<T> {}
 
 #[async_trait]
-impl<T> LocalSendProxy for TokioChannelProxy {
+impl<T: From<Bytes> + Into<Bytes>> LocalSendProxy<T> for TokioChannelProxy<T> {
     async fn local_send(&self, dest: u32, msg: LocalMessage<T>) -> Result<()> {
         self.sender.remote_send(dest, msg).await
     }
 }
 
 #[async_trait]
-impl<T> LocalReceiveProxy for TokioChannelProxy {
+impl<T: From<Bytes> + Into<Bytes>> LocalReceiveProxy<T> for TokioChannelProxy<T> {
     async fn local_recv(&self, source: u32) -> Result<LocalMessage<T>> {
         self.receiver.remote_recv(source).await
     }
 }
 
-impl<T> TokioChannelProxy {
+impl<T> TokioChannelProxy<T> {
     pub fn new(
         worker_id: u32,
         tx_channels: Arc<HashMap<u32, UnboundedSender<LocalMessage<T>>>>,
@@ -147,7 +156,7 @@ impl<T> TokioChannelProxy {
 }
 
 #[async_trait]
-impl<T> LocalSendProxy for TokioChannelSendProxy<T> {
+impl<T: From<Bytes> + Into<Bytes> + Send> LocalSendProxy<T> for TokioChannelSendProxy<T> {
     async fn local_send(&self, dest: u32, msg: LocalMessage<T>) -> Result<()> {
         if let Some(tx) = self.tx_channels.get(&dest) {
             tx.send(msg.clone())?;
@@ -158,7 +167,7 @@ impl<T> LocalSendProxy for TokioChannelSendProxy<T> {
     }
 }
 
-impl<T> TokioChannelSendProxy<T> {
+impl<T: From<Bytes> + Into<Bytes>> TokioChannelSendProxy<T> {
     pub fn new(local_channel_tx: Arc<HashMap<u32, UnboundedSender<LocalMessage<T>>>>) -> Self {
         Self {
             tx_channels: local_channel_tx,
@@ -167,7 +176,7 @@ impl<T> TokioChannelSendProxy<T> {
 }
 
 #[async_trait]
-impl<T> LocalReceiveProxy for TokioChannelReceiveProxy<T> {
+impl<T: From<Bytes> + Into<Bytes> + Send> LocalReceiveProxy<T> for TokioChannelReceiveProxy<T> {
     async fn local_recv(&self, _source: u32) -> Result<LocalMessage<T>> {
         if let Some(msg) = self.rx_channel.lock().await.recv().await {
             Ok(msg)
@@ -177,7 +186,7 @@ impl<T> LocalReceiveProxy for TokioChannelReceiveProxy<T> {
     }
 }
 
-impl<T> TokioChannelReceiveProxy<T> {
+impl<T: From<Bytes> + Into<Bytes>> TokioChannelReceiveProxy<T> {
     pub fn new(local_channel_rx: UnboundedReceiver<LocalMessage<T>>) -> Self {
         Self {
             rx_channel: Mutex::new(local_channel_rx),
@@ -187,24 +196,24 @@ impl<T> TokioChannelReceiveProxy<T> {
 
 // BROADCAST PROXIES
 
-pub struct TokioChannelBroadcastProxy {
+pub struct TokioChannelBroadcastProxy<T> {
     broadcast_sender: Box<dyn LocalBroadcastSendProxy>,
     broadcast_receiver: Box<dyn LocalBroadcastReceiveProxy>,
 }
 
-pub struct TokioChannelBroadcastSendProxy<T> {
+pub struct TokioChannelBroadcastSendProxy<T: From<Bytes> + Into<Bytes>> {
     worker_id: u32,
     broadcast_channel_tx: Sender<LocalMessage<T>>,
 }
 
-pub struct TokioChannelBroadcastReceiveProxy<T> {
+pub struct TokioChannelBroadcastReceiveProxy<T: From<Bytes> + Into<Bytes>> {
     worker_id: u32,
     broadcast_channel_rx: Mutex<Receiver<LocalMessage<T>>>,
 }
 
-impl LocalBroadcastProxy for TokioChannelBroadcastProxy {}
+impl<T> LocalBroadcastProxy for TokioChannelBroadcastProxy<T> {}
 
-impl<T> TokioChannelBroadcastProxy {
+impl<T> TokioChannelBroadcastProxy<T> {
     pub fn new(worker_id: u32, broadcast_channel_tx: Sender<LocalMessage<T>>) -> Self {
         Self {
             broadcast_receiver: Box::new(TokioChannelBroadcastReceiveProxy::new(
@@ -220,21 +229,23 @@ impl<T> TokioChannelBroadcastProxy {
 }
 
 #[async_trait]
-impl<T> LocalBroadcastSendProxy for TokioChannelBroadcastProxy {
+impl<T> LocalBroadcastSendProxy for TokioChannelBroadcastProxy<T> {
     async fn local_broadcast_send(&self, msg: LocalMessage<T>) -> Result<()> {
         self.broadcast_sender.broadcast_send(msg).await
     }
 }
 
 #[async_trait]
-impl<T> LocalBroadcastReceiveProxy for TokioChannelBroadcastProxy {
+impl<T> LocalBroadcastReceiveProxy for TokioChannelBroadcastProxy<T> {
     async fn local_broadcast_recv(&self) -> Result<LocalMessage<T>> {
         self.broadcast_receiver.broadcast_recv().await
     }
 }
 
 #[async_trait]
-impl<T> LocalBroadcastSendProxy for TokioChannelBroadcastSendProxy<T> {
+impl<T: From<Bytes> + Into<Bytes> + Send> LocalBroadcastSendProxy
+    for TokioChannelBroadcastSendProxy<T>
+{
     async fn local_broadcast_send(&self, msg: LocalMessage<T>) -> Result<()> {
         log::debug!("[worker {}] Send broadcast local channel", self.worker_id,);
         self.broadcast_channel_tx.send(msg.clone())?;
@@ -242,7 +253,7 @@ impl<T> LocalBroadcastSendProxy for TokioChannelBroadcastSendProxy<T> {
     }
 }
 
-impl<T> TokioChannelBroadcastSendProxy<T> {
+impl<T: From<Bytes> + Into<Bytes>> TokioChannelBroadcastSendProxy<T> {
     pub fn new(worker_id: u32, broadcast_channel_tx: Sender<LocalMessage<T>>) -> Self {
         Self {
             worker_id,
@@ -252,7 +263,9 @@ impl<T> TokioChannelBroadcastSendProxy<T> {
 }
 
 #[async_trait]
-impl<T> LocalBroadcastReceiveProxy for TokioChannelBroadcastReceiveProxy<T> {
+impl<T: From<Bytes> + Into<Bytes> + Send> LocalBroadcastReceiveProxy
+    for TokioChannelBroadcastReceiveProxy<T>
+{
     async fn local_broadcast_recv(&self) -> Result<LocalMessage<T>> {
         log::debug!(
             "[worker {}] Receive broadcast local channel",
@@ -265,7 +278,7 @@ impl<T> LocalBroadcastReceiveProxy for TokioChannelBroadcastReceiveProxy<T> {
     }
 }
 
-impl<T> TokioChannelBroadcastReceiveProxy<T> {
+impl<T: From<Bytes> + Into<Bytes>> TokioChannelBroadcastReceiveProxy<T> {
     pub fn new(worker_id: u32, broadcast_channel_rx: Receiver<LocalMessage<T>>) -> Self {
         Self {
             broadcast_channel_rx: Mutex::new(broadcast_channel_rx),

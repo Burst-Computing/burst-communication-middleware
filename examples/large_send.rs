@@ -1,7 +1,7 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, MiddlewareActorHandle, RabbitMQMImpl, RabbitMQOptions,
-    RedisListImpl, RedisListOptions, RedisStreamImpl, RedisStreamOptions, S3Impl, S3Options,
-    TokioChannelImpl, TokioChannelOptions,
+    BurstMiddleware, BurstOptions, Middleware, MiddlewareActorHandle, RabbitMQMImpl,
+    RabbitMQOptions, RedisListImpl, RedisListOptions, RedisStreamImpl, RedisStreamOptions, S3Impl,
+    S3Options, TokioChannelImpl, TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -53,15 +53,14 @@ fn handle_group(
     let mut proxies = tokio_runtime.block_on(fut).unwrap().unwrap();
     let proxy = proxies.remove(&worker_id).unwrap();
 
-    let actor = MiddlewareActorHandle::new(proxy, &tokio_runtime);
+    let actor = Middleware::new(proxy, tokio_runtime.handle().clone());
 
-    let thread = thread::spawn(move || {
-        let worker_id = actor.info.worker_id;
+    thread::spawn(move || {
+        let worker_id = actor.info().worker_id;
         info!("thread start: id={}", worker_id);
         worker(actor);
         info!("thread end: id={}", worker_id);
-    });
-    return thread;
+    })
 }
 
 fn main() {
@@ -88,7 +87,8 @@ fn main() {
     g2.join().unwrap();
 }
 
-fn worker(burst_middleware: MiddlewareActorHandle) {
+fn worker(burst_middleware: Middleware) {
+    let burst_middleware = burst_middleware.get_actor_handle();
     if burst_middleware.info.worker_id == 0 {
         info!("worker {} sending message", burst_middleware.info.worker_id);
         let payload = Bytes::from(vec![0; PAYLOAD_SIZE]);
@@ -108,7 +108,7 @@ fn worker(burst_middleware: MiddlewareActorHandle) {
         info!(
             "worker {} received message with size {:?}",
             burst_middleware.info.worker_id,
-            message.data.len()
+            message.len()
         );
         let response = "bye!".to_string();
         let payload = Bytes::from(response);

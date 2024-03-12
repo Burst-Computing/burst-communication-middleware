@@ -31,9 +31,18 @@ pub struct MessageMetadata {
     pub collective: CollectiveType,
 }
 
-impl<T> From<LocalMessage<T>> for RemoteMessage {
+impl<T: From<Bytes> + Into<Bytes>> From<LocalMessage<T>> for RemoteMessage {
     fn from(msg: LocalMessage<T>) -> Self {
         RemoteMessage {
+            metadata: msg.metadata,
+            data: msg.data.into(),
+        }
+    }
+}
+
+impl<T: From<Bytes> + Into<Bytes>> From<RemoteMessage> for LocalMessage<T> {
+    fn from(msg: RemoteMessage) -> Self {
+        LocalMessage {
             metadata: msg.metadata,
             data: msg.data.into(),
         }
