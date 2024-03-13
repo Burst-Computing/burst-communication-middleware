@@ -6,10 +6,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone)]
 #[repr(C)]
-pub struct LocalMessage<T>
-where
-    T: From<Bytes> + Into<Bytes>,
-{
+pub struct LocalMessage<T> {
     pub metadata: MessageMetadata,
     pub data: T,
 }
@@ -21,7 +18,7 @@ pub struct RemoteMessage {
     pub data: Bytes,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[repr(C)]
 pub struct MessageMetadata {
     pub sender_id: u32,
@@ -31,7 +28,10 @@ pub struct MessageMetadata {
     pub collective: CollectiveType,
 }
 
-impl<T: From<Bytes> + Into<Bytes>> From<LocalMessage<T>> for RemoteMessage {
+impl<T> From<LocalMessage<T>> for RemoteMessage
+where
+    T: Into<Bytes>,
+{
     fn from(msg: LocalMessage<T>) -> Self {
         RemoteMessage {
             metadata: msg.metadata,
@@ -40,11 +40,14 @@ impl<T: From<Bytes> + Into<Bytes>> From<LocalMessage<T>> for RemoteMessage {
     }
 }
 
-impl<T: From<Bytes> + Into<Bytes>> From<RemoteMessage> for LocalMessage<T> {
+impl<T> From<RemoteMessage> for LocalMessage<T>
+where
+    T: From<Bytes>,
+{
     fn from(msg: RemoteMessage) -> Self {
         LocalMessage {
             metadata: msg.metadata,
-            data: msg.data.into(),
+            data: T::from(msg.data),
         }
     }
 }
@@ -118,13 +121,18 @@ fn deserialize_header(header: &[u8]) -> RemoteMessage {
 
 impl Debug for RemoteMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Message")
-            .field("sender_id", &self.sender_id)
-            .field("chunk_id", &self.chunk_id)
-            .field("num_chunks", &self.num_chunks)
-            .field("counter", &self.counter)
-            .field("collective", &self.collective)
+        f.debug_struct("RemoteMessage")
+            .field("metadata", &self.metadata)
             .field("data", &self.data.len())
+            .finish()
+    }
+}
+
+// TODO: print data len?
+impl<T> Debug for LocalMessage<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalMessage")
+            .field("metadata", &self.metadata)
             .finish()
     }
 }

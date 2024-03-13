@@ -288,14 +288,14 @@ impl RedisListBroadcastProxy {
 #[async_trait]
 impl RemoteBroadcastSendProxy for RedisListBroadcastProxy {
     async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
-        self.broadcast_sender.broadcast_send(msg).await
+        self.broadcast_sender.remote_broadcast_send(msg).await
     }
 }
 
 #[async_trait]
 impl RemoteBroadcastReceiveProxy for RedisListBroadcastProxy {
     async fn remote_broadcast_recv(&self) -> Result<RemoteMessage> {
-        self.broadcast_receiver.broadcast_recv().await
+        self.broadcast_receiver.remote_broadcast_recv().await
     }
 }
 
@@ -306,7 +306,7 @@ impl RemoteBroadcastSendProxy for RedisListBroadcastSendProxy {
 
         let bcast_key = format!(
             "{}:broadcast:{}:{}",
-            self.burst_options.burst_id, msg.counter, msg.chunk_id
+            self.burst_options.burst_id, msg.metadata.counter, msg.metadata.chunk_id
         );
         log::debug!("SET {:?} {}:header {}:payload", msg, bcast_key, bcast_key);
         let [header, payload]: [&[u8]; 2] = (&msg).into();

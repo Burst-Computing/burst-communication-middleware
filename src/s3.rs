@@ -272,7 +272,7 @@ impl S3SendProxy {
 impl RemoteSendProxy for S3SendProxy {
     async fn remote_send(&self, dest: u32, msg: RemoteMessage) -> Result<()> {
         let byte_stream = ByteStream::from(msg.data.clone());
-        let key = format_RemoteMessage_key(&self.burst_options.burst_id, dest, &msg);
+        let key = format_remote_message_key(&self.burst_options.burst_id, dest, &msg);
         let permit = self.client_semaphore.acquire().await.unwrap();
         self.s3_client
             .put_object()
@@ -280,10 +280,10 @@ impl RemoteSendProxy for S3SendProxy {
             .key(key.clone())
             .body(byte_stream)
             .metadata("sender_id", self.worker_id.to_string())
-            .metadata("collective", msg.collective.to_string())
-            .metadata("counter", msg.counter.to_string())
-            .metadata("chunk_id", msg.chunk_id.to_string())
-            .metadata("num_chunks", msg.num_chunks.to_string())
+            .metadata("collective", msg.metadata.collective.to_string())
+            .metadata("counter", msg.metadata.counter.to_string())
+            .metadata("chunk_id", msg.metadata.chunk_id.to_string())
+            .metadata("num_chunks", msg.metadata.num_chunks.to_string())
             .send()
             .await?;
         log::debug!("S3 Put object {}", key);
@@ -340,7 +340,7 @@ impl RemoteReceiveProxy for S3ReceiveProxy {
         };
         drop(keys);
         let bucket = self.s3_options.bucket.clone();
-        let msg = match get_object_as_RemoteMessage(&bucket, &key, &self.s3_client).await? {
+        let msg = match get_object_as_remote_message(&bucket, &key, &self.s3_client).await? {
             Some(msg) => msg,
             None => {
                 return Err(format!("Failed to get object {} as RemoteMessage", key).into());
@@ -405,14 +405,14 @@ impl S3BroadcastProxy {
 #[async_trait]
 impl RemoteBroadcastSendProxy for S3BroadcastProxy {
     async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
-        self.broadcast_sender.broadcast_send(msg).await
+        self.broadcast_sender.remote_broadcast_send(msg).await
     }
 }
 
 #[async_trait]
 impl RemoteBroadcastReceiveProxy for S3BroadcastProxy {
     async fn remote_broadcast_recv(&self) -> Result<RemoteMessage> {
-        self.broadcast_receiver.broadcast_recv().await
+        self.broadcast_receiver.remote_broadcast_recv().await
     }
 }
 
@@ -441,7 +441,10 @@ impl RemoteBroadcastSendProxy for S3BroadcastSendProxy {
 
         let key = format!(
             "{}/broadcast/sender-{}/counter-{}/part-{}",
-            self.burst_options.burst_id, msg.sender_id, msg.counter, msg.chunk_id
+            self.burst_options.burst_id,
+            msg.metadata.sender_id,
+            msg.metadata.counter,
+            msg.metadata.chunk_id
         );
         let permit = self.client_semaphore.acquire().await?;
         self.s3_client
@@ -449,11 +452,11 @@ impl RemoteBroadcastSendProxy for S3BroadcastSendProxy {
             .bucket(self.s3_options.bucket.clone())
             .key(&key)
             .body(ByteStream::from(msg.data))
-            .metadata("sender_id", msg.sender_id.to_string())
-            .metadata("collective", msg.collective.to_string())
-            .metadata("counter", msg.counter.to_string())
-            .metadata("chunk_id", msg.chunk_id.to_string())
-            .metadata("num_chunks", msg.num_chunks.to_string())
+            .metadata("sender_id", msg.metadata.sender_id.to_string())
+            .metadata("collective", msg.metadata.collective.to_string())
+            .metadata("counter", msg.metadata.counter.to_string())
+            .metadata("chunk_id", msg.metadata.chunk_id.to_string())
+            .metadata("num_chunks", msg.metadata.num_chunks.to_string())
             .send()
             .await?;
         log::debug!("S3 Put object {}", key);
@@ -506,7 +509,7 @@ impl RemoteBroadcastReceiveProxy for S3BroadcastReceiveProxy {
         drop(keys);
 
         let bucket = self.s3_options.bucket.clone();
-        let msg = match get_object_as_RemoteMessage(&bucket, &key, &self.s3_client).await? {
+        let msg = match get_object_as_remote_message(&bucket, &key, &self.s3_client).await? {
             Some(msg) => msg,
             None => {
                 return Err(format!("Failed to get object {} as RemoteMessage", key).into());
@@ -520,14 +523,14 @@ impl RemoteBroadcastReceiveProxy for S3BroadcastReceiveProxy {
 
 // Helper functions
 
-fn format_RemoteMessage_key(burst_id: &str, dest: u32, msg: &RemoteMessage) -> String {
+fn format_remote_message_key(burst_id: &str, dest: u32, msg: &RemoteMessage) -> String {
     format!(
         "{}/worker-{}/sender-{}/counter-{}/part-{}",
-        burst_id, dest, msg.sender_id, msg.counter, msg.chunk_id
+        burst_id, dest, msg.metadata.sender_id, msg.metadata.counter, msg.metadata.chunk_id
     )
 }
 
-async fn get_object_as_RemoteMessage(
+async fn get_object_as_remote_message(
     bucket: &String,
     key: &String,
     s3_client: &Client,

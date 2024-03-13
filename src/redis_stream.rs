@@ -314,14 +314,14 @@ impl RedisStreamBroadcastProxy {
 #[async_trait]
 impl RemoteBroadcastSendProxy for RedisStreamBroadcastProxy {
     async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
-        self.broadcast_sender.broadcast_send(msg).await
+        self.broadcast_sender.remote_broadcast_send(msg).await
     }
 }
 
 #[async_trait]
 impl RemoteBroadcastReceiveProxy for RedisStreamBroadcastProxy {
     async fn remote_broadcast_recv(&self) -> Result<RemoteMessage> {
-        self.broadcast_receiver.broadcast_recv().await
+        self.broadcast_receiver.remote_broadcast_recv().await
     }
 }
 

@@ -330,14 +330,14 @@ impl RabbitMQRemoteBroadcastProxy {
 #[async_trait]
 impl RemoteBroadcastSendProxy for RabbitMQRemoteBroadcastProxy {
     async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
-        self.broadcast_sender.broadcast_send(msg).await
+        self.broadcast_sender.remote_broadcast_send(msg).await
     }
 }
 
 #[async_trait]
 impl RemoteBroadcastReceiveProxy for RabbitMQRemoteBroadcastProxy {
     async fn remote_broadcast_recv(&self) -> Result<RemoteMessage> {
-        self.broadcast_receiver.broadcast_recv().await
+        self.broadcast_receiver.remote_broadcast_recv().await
     }
 }
 
@@ -641,13 +641,13 @@ fn get_consumer_tag() -> String {
 
 fn create_headers(msg: &RemoteMessage) -> FieldTable {
     let mut fields = FieldTable::default();
-    fields.insert("sender_id".into(), AMQPValue::LongUInt(msg.sender_id));
-    fields.insert("chunk_id".into(), AMQPValue::LongUInt(msg.chunk_id));
-    fields.insert("num_chunks".into(), AMQPValue::LongUInt(msg.num_chunks));
-    fields.insert("counter".into(), AMQPValue::LongUInt(msg.counter));
+    fields.insert("sender_id".into(), AMQPValue::LongUInt(msg.metadata.sender_id));
+    fields.insert("chunk_id".into(), AMQPValue::LongUInt(msg.metadata.chunk_id));
+    fields.insert("num_chunks".into(), AMQPValue::LongUInt(msg.metadata.num_chunks));
+    fields.insert("counter".into(), AMQPValue::LongUInt(msg.metadata.counter));
     fields.insert(
         "collective".into(),
-        AMQPValue::LongUInt(msg.collective as u32),
+        AMQPValue::LongUInt(msg.metadata.collective as u32),
     );
     fields
 }

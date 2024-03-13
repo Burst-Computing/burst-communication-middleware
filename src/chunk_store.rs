@@ -84,11 +84,11 @@ pub fn chunk_message(msg: &RemoteMessage, max_chunk_size: usize) -> Vec<RemoteMe
         .enumerate()
         .map(|(i, data)| RemoteMessage {
             metadata: MessageMetadata {
-                sender_id: msg.sender_id,
+                sender_id: msg.metadata.sender_id,
                 chunk_id: i as u32,
                 num_chunks: num_chunks as u32,
-                counter: msg.counter,
-                collective: msg.collective,
+                counter: msg.metadata.counter,
+                collective: msg.metadata.collective,
             },
             data,
         })

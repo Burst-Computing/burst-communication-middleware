@@ -159,7 +159,7 @@ impl StreamServerProxy {
 #[async_trait]
 impl RemoteSendProxy for StreamServerSendProxy {
     async fn remote_send(&self, dest: u32, msg: RemoteMessage) -> Result<()> {
-        if msg.collective == CollectiveType::Broadcast {
+        if msg.metadata.collective == CollectiveType::Broadcast {
             Err("Cannot send broadcast message to a single destination".into())
         } else {
             let data: &[&[u8]; 2] = &(&msg).into();
@@ -217,14 +217,14 @@ impl RemoteBroadcastProxy for StreamServerBroadcastProxy {}
 #[async_trait]
 impl RemoteBroadcastSendProxy for StreamServerBroadcastProxy {
     async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
-        self.broadcast_sender.broadcast_send(msg).await
+        self.broadcast_sender.remote_broadcast_send(msg).await
     }
 }
 
 #[async_trait]
 impl RemoteBroadcastReceiveProxy for StreamServerBroadcastProxy {
     async fn remote_broadcast_recv(&self) -> Result<RemoteMessage> {
-        self.broadcast_receiver.broadcast_recv().await
+        self.broadcast_receiver.remote_broadcast_recv().await
     }
 }
 
@@ -264,7 +264,7 @@ impl StreamServerBroadcastSendProxy {
 #[async_trait]
 impl RemoteBroadcastSendProxy for StreamServerBroadcastSendProxy {
     async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
-        if msg.collective != CollectiveType::Broadcast {
+        if msg.metadata.collective != CollectiveType::Broadcast {
             Err("Cannot send non-broadcast message to broadcast".into())
         } else {
             let mut tasks = Vec::new();

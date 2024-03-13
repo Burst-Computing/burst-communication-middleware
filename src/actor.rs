@@ -48,7 +48,7 @@ enum ActorMessage<T> {
 
 impl<T> MiddlewareActor<T>
 where
-    T: From<Bytes> + Into<Bytes>,
+    T: From<Bytes> + Into<Bytes> + Send + Sync + Clone + 'static,
 {
     fn new(receiver: mpsc::Receiver<ActorMessage<T>>, middleware: BurstMiddleware<T>) -> Self {
         MiddlewareActor {
@@ -76,87 +76,85 @@ where
                 respond_to,
             } => {
                 let result = self.middleware.send(worker_dest, payload).await;
-                match respond_to.send(result) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        log::error!(
-                            "Failed to send response to {}",
-                            self.middleware.info().worker_id
-                        );
-                    }
-                };
+                self.send_log(respond_to, result);
             }
             ActorMessage::ReceiveMessage { from, respond_to } => {
-                match self.middleware.recv(from).await {
-                    Ok(res) => {
-                        respond_to.send(Ok(res.data));
-                    }
-                    Err(e) => {
-                        respond_to.send(Err(e));
-                    }
-                };
+                let result = self.middleware.recv(from).await;
+                self.send_log(
+                    respond_to,
+                    match result {
+                        Ok(data) => Ok(data.data),
+                        Err(e) => Err(e),
+                    },
+                );
             }
             ActorMessage::Broadcast {
                 root,
                 payload,
                 respond_to,
             } => {
-                match self.middleware.broadcast(payload, root).await {
-                    Ok(res) => {
-                        respond_to.send(Ok(res.data));
-                    }
-                    Err(e) => {
-                        respond_to.send(Err(e));
-                    }
-                };
+                let result = self.middleware.broadcast(payload, root).await;
+                self.send_log(
+                    respond_to,
+                    match result {
+                        Ok(data) => Ok(data.data),
+                        Err(e) => Err(e),
+                    },
+                );
             }
             ActorMessage::Scatter {
                 payloads,
                 root,
                 respond_to,
             } => {
-                match self.middleware.scatter(payloads, root).await {
-                    Ok(res) => {
-                        respond_to.send(Ok(res.data));
-                    }
-                    Err(e) => {
-                        respond_to.send(Err(e));
-                    }
-                };
+                let result = self.middleware.scatter(payloads, root).await;
+                self.send_log(
+                    respond_to,
+                    match result {
+                        Ok(data) => Ok(data.data),
+                        Err(e) => Err(e),
+                    },
+                );
             }
             ActorMessage::Gather {
                 payload,
                 root,
                 respond_to,
             } => {
-                match self.middleware.gather(payload, root).await {
-                    Ok(res) => {
-                        if let Some(data) = res {
-                            let data = data.into_iter().map(|m| m.data).collect::<Vec<T>>();
-                            respond_to.send(Ok(Some(data)));
-                        } else {
-                            respond_to.send(Ok(None));
+                let result = self.middleware.gather(payload, root).await;
+                self.send_log(
+                    respond_to,
+                    match result {
+                        Ok(Some(data)) => {
+                            Ok(Some(data.into_iter().map(|m| m.data).collect::<Vec<T>>()))
                         }
-                    }
-                    Err(e) => {
-                        respond_to.send(Err(e));
-                    }
-                };
+                        Ok(None) => Ok(None),
+                        Err(e) => Err(e),
+                    },
+                );
             }
             ActorMessage::AllToAll {
                 payload,
                 respond_to,
             } => {
-                match self.middleware.all_to_all(payload).await {
-                    Ok(res) => {
-                        let data = res.into_iter().map(|m| m.data).collect::<Vec<T>>();
-                        respond_to.send(Ok(data));
-                    }
-                    Err(e) => {
-                        respond_to.send(Err(e));
-                    }
-                };
+                let result = self.middleware.all_to_all(payload).await;
+                self.send_log(
+                    respond_to,
+                    match result {
+                        Ok(data) => Ok(data.into_iter().map(|m| m.data).collect::<Vec<T>>()),
+                        Err(e) => Err(e),
+                    },
+                );
             }
+        }
+    }
+
+    fn send_log<M>(&self, send_to: oneshot::Sender<M>, msg: M) {
+        if send_to.send(msg).is_err() {
+            log::error!(
+                "MiddlewareActor id={} failed to send message",
+                self.middleware.info().worker_id,
+            );
         }
     }
 }
@@ -169,7 +167,7 @@ pub struct MiddlewareActorHandle<T> {
 
 impl<T> MiddlewareActorHandle<T>
 where
-    T: From<Bytes> + Into<Bytes> + Send + Sync + 'static,
+    T: From<Bytes> + Into<Bytes> + Send + Sync + Clone + 'static,
 {
     pub fn new(middleware: BurstMiddleware<T>, tokio_runtime: &Handle) -> Self {
         let (sender, receiver) = mpsc::channel(1);

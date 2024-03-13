@@ -1,5 +1,3 @@
-use bytes::Bytes;
-
 use crate::{
     chunk_store::BytesMutChunkedMessageBody,
     types::{CollectiveType, LocalMessage, RemoteMessage},
@@ -24,19 +22,25 @@ impl RemoteMessageBuffer {
     }
 
     pub fn insert(&mut self, msg: RemoteMessage) {
-        let chunk_id = msg.chunk_id;
+        let chunk_id = msg.metadata.chunk_id;
 
-        if let hash_map::Entry::Vacant(e) =
-            self.buffer
-                .entry((msg.sender_id, msg.collective, msg.counter))
-        {
-            let mut message_body = BytesMutChunkedMessageBody::new(msg.num_chunks, self.chunk_size);
+        if let hash_map::Entry::Vacant(e) = self.buffer.entry((
+            msg.metadata.sender_id,
+            msg.metadata.collective,
+            msg.metadata.counter,
+        )) {
+            let mut message_body =
+                BytesMutChunkedMessageBody::new(msg.metadata.num_chunks, self.chunk_size);
             message_body.insert(chunk_id, msg.data);
             e.insert(message_body);
         } else {
             let message_body = self
                 .buffer
-                .get_mut(&(msg.sender_id, msg.collective, msg.counter))
+                .get_mut(&(
+                    msg.metadata.sender_id,
+                    msg.metadata.collective,
+                    msg.metadata.counter,
+                ))
                 .unwrap();
             message_body.insert(chunk_id, msg.data);
         }
@@ -84,11 +88,11 @@ impl RemoteMessageBuffer {
     }
 }
 
-pub struct LocalMessageBuffer<T: From<Bytes> + Into<Bytes>> {
+pub struct LocalMessageBuffer<T> {
     buffer: HashMap<MessageKey, LocalMessage<T>>,
 }
 
-impl<T: From<Bytes> + Into<Bytes>> LocalMessageBuffer<T> {
+impl<T> LocalMessageBuffer<T> {
     pub fn new() -> Self {
         LocalMessageBuffer {
             buffer: HashMap::new(),
@@ -96,16 +100,22 @@ impl<T: From<Bytes> + Into<Bytes>> LocalMessageBuffer<T> {
     }
 
     pub fn insert(&mut self, msg: LocalMessage<T>) {
-        self.buffer
-            .insert((msg.sender_id, msg.collective, msg.counter), msg);
+        self.buffer.insert(
+            (
+                msg.metadata.sender_id,
+                msg.metadata.collective,
+                msg.metadata.counter,
+            ),
+            msg,
+        );
     }
 
     pub fn get(
         &mut self,
-        sender_id: &u32,
-        collective: &CollectiveType,
-        counter: &u32,
+        sender_id: u32,
+        collective: CollectiveType,
+        counter: u32,
     ) -> Option<LocalMessage<T>> {
-        self.buffer.remove((sender_id, collective, counter))
+        self.buffer.remove(&(sender_id, collective, counter))
     }
 }

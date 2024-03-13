@@ -70,7 +70,10 @@ pub struct Middleware<T> {
     runtime: Handle,
 }
 
-impl<T> Middleware<T> {
+impl<T> Middleware<T>
+where
+    T: From<Bytes> + Into<Bytes> + Send + Clone + 'static,
+{
     pub fn new(middleware: BurstMiddleware<T>, runtime: Handle) -> Self {
         Self {
             middleware,
@@ -93,7 +96,10 @@ impl<T> Middleware<T> {
 pub fn create_actors<T>(
     conf: Config,
     tokio_runtime: &Runtime,
-) -> Result<HashMap<u32, Middleware<T>>> {
+) -> Result<HashMap<u32, Middleware<T>>>
+where
+    T: From<Bytes> + Into<Bytes> + Send + Sync + Clone + 'static,
+{
     let burst_options = BurstOptions::new(
         conf.burst_size,
         conf.group_ranges,
