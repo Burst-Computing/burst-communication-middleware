@@ -1,5 +1,5 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, Message, Middleware, MiddlewareActorHandle, RabbitMQMImpl,
+    BurstMiddleware, BurstOptions, Middleware, MiddlewareActorHandle, RabbitMQMImpl,
     RabbitMQOptions, RedisListImpl, RedisListOptions, RedisStreamImpl, RedisStreamOptions, S3Impl,
     S3Options, TokioChannelImpl, TokioChannelOptions,
 };
@@ -82,10 +82,16 @@ fn main() {
                     Middleware::new(middleware, tokio_runtime.handle().clone()),
                 )
             })
-            .collect::<HashMap<u32, Middleware>>();
+            .collect::<HashMap<u32, Middleware<Bytes>>>();
 
-        let group_threads = group(actors);
-        threads.extend(group_threads);
+        for (worker_id, actor) in actors {
+            let thread = thread::spawn(move || {
+                info!("thread start: id={}", worker_id);
+                worker(actor);
+                info!("thread end: id={}", worker_id);
+            });
+            threads.push(thread);
+        }
     }
 
     for thread in threads {
@@ -93,21 +99,7 @@ fn main() {
     }
 }
 
-fn group(proxies: HashMap<u32, Middleware>) -> Vec<std::thread::JoinHandle<()>> {
-    let mut threads = Vec::with_capacity(proxies.len());
-    for (worker_id, proxy) in proxies {
-        let thread = thread::spawn(move || {
-            info!("thread start: id={}", worker_id);
-            worker(proxy);
-            info!("thread end: id={}", worker_id);
-        });
-        threads.push(thread);
-    }
-
-    threads
-}
-
-fn worker(burst_middleware: Middleware) {
+fn worker(burst_middleware: Middleware<Bytes>) {
     let burst_middleware = burst_middleware.get_actor_handle();
     let res = if burst_middleware.info.worker_id == 0 {
         let payload = Bytes::from(vec![0; PAYLOAD_SIZE]);

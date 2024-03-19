@@ -1,7 +1,7 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, Message, MiddlewareActorHandle, RabbitMQMImpl, RabbitMQOptions,
-    RedisListImpl, RedisListOptions, RedisStreamImpl, RedisStreamOptions, S3Impl, S3Options,
-    TokioChannelImpl, TokioChannelOptions,
+    BurstMiddleware, BurstOptions, Middleware, MiddlewareActorHandle, RabbitMQMImpl,
+    RabbitMQOptions, RedisListImpl, RedisListOptions, RedisStreamImpl, RedisStreamOptions, S3Impl,
+    S3Options, TokioChannelImpl, TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -9,10 +9,10 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     ops::Add,
-    thread,
+    thread, time,
 };
 
-const BURST_SIZE: u32 = 8;
+const BURST_SIZE: u32 = 256;
 const GROUPS: u32 = 4;
 
 fn main() {
@@ -51,10 +51,10 @@ fn main() {
             .broadcast_channel_size(256)
             .build();
 
-        let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-            .durable_queues(true)
-            .ack(true)
-            .build();
+        // let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+        //     .durable_queues(true)
+        //     .ack(true)
+        //     .build();
         // let s3_options = S3Options::new(env::var("S3_BUCKET").unwrap())
         //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
         //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
@@ -63,46 +63,43 @@ fn main() {
         //     .endpoint(None)
         //     .enable_broadcast(true)
         //     .build();
-        // let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
+        let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
         // let backend_options = RedisStreamOptions::new("redis://127.0.0.1".to_string()).build();
 
         let fut = tokio_runtime.spawn(BurstMiddleware::create_proxies::<
             TokioChannelImpl,
-            RabbitMQMImpl,
+            RedisListImpl,
             _,
             _,
         >(burst_options, channel_options, backend_options));
         let proxies = tokio_runtime.block_on(fut).unwrap().unwrap();
 
-        // let actors = proxies
-        //     .into_iter()
-        //     .map(|(worker_id, middleware)| {
-        //         let actor = MiddlewareActorHandle::new(middleware, &tokio_runtime);
-        //         (worker_id, actor)
-        //     })
-        //     .collect::<HashMap<u32, MiddlewareActorHandle>>();
+        let actors = proxies
+            .into_iter()
+            .map(|(worker_id, middleware)| {
+                (
+                    worker_id,
+                    Middleware::new(middleware, tokio_runtime.handle().clone()),
+                )
+            })
+            .collect::<HashMap<u32, Middleware<Myi32>>>();
 
-        let group_threads = group(proxies);
-        threads.extend(group_threads);
+        for (worker_id, actor) in actors {
+            let thread = thread::spawn(move || {
+                info!("thread start: id={}", worker_id);
+                worker(actor);
+                info!("thread end: id={}", worker_id);
+            });
+            threads.push(thread);
+        }
     }
 
     for thread in threads {
         thread.join().unwrap();
     }
-}
 
-fn group(proxies: HashMap<u32, BurstMiddleware>) -> Vec<std::thread::JoinHandle<()>> {
-    let mut threads = Vec::with_capacity(proxies.len());
-    for (worker_id, proxy) in proxies {
-        let thread = thread::spawn(move || {
-            info!("thread start: id={}", worker_id);
-            worker(proxy);
-            info!("thread end: id={}", worker_id);
-        });
-        threads.push(thread);
-    }
-
-    return threads;
+    // Sleep 5 seconds
+    std::thread::sleep(time::Duration::from_secs(5));
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -122,26 +119,24 @@ impl From<Myi32> for Bytes {
     }
 }
 
-impl Add for Myi32 {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self {
-        Self(self.0 + other.0)
+impl From<Myi32> for i32 {
+    fn from(val: Myi32) -> Self {
+        val.0
     }
 }
 
-fn worker(mut burst_middleware: BurstMiddleware) {
-    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
+fn worker(burst_middleware: Middleware<Myi32>) {
+    let burst_middleware = burst_middleware.get_actor_handle();
     let val: Myi32 = Myi32(1);
-    let res = tokio_runtime
-        .block_on(burst_middleware.reduce(val, |a, b| a + b))
+    let result = burst_middleware
+        .reduce(val, |a, b| {
+            let a: i32 = a.into();
+            let b: i32 = b.into();
+            Myi32(a + b)
+        })
         .unwrap();
 
-    if let Some(res) = res {
-        info!("----------> Reduced value is {:?} <----------", res);
+    if let Some(result) = result {
+        info!("----------> Reduced value is {:?} <----------", result);
     }
 }

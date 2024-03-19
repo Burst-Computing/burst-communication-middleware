@@ -1,5 +1,5 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, Message, Middleware, MiddlewareActorHandle, RabbitMQMImpl,
+    BurstMiddleware, BurstOptions, Middleware, MiddlewareActorHandle, RabbitMQMImpl,
     RabbitMQOptions, RedisListImpl, RedisListOptions, RedisStreamImpl, RedisStreamOptions, S3Impl,
     S3Options, TokioChannelImpl, TokioChannelOptions,
 };
@@ -10,8 +10,8 @@ use std::{
     env, thread,
 };
 
-const BURST_SIZE: u32 = 128;
-const GROUPS: u32 = 16;
+const BURST_SIZE: u32 = 32;
+const GROUPS: u32 = 4;
 const PAYLOAD_SIZE: usize = 4 * 1024 * 1024; // 4MB
 
 #[derive(Debug)]
@@ -74,10 +74,10 @@ fn main() {
             .broadcast_channel_size(256)
             .build();
 
-        let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-            .durable_queues(true)
-            .ack(true)
-            .build();
+        // let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+        //     .durable_queues(true)
+        //     .ack(true)
+        //     .build();
         // let s3_options = S3Options::new(env::var("S3_BUCKET").unwrap())
         //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
         //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
@@ -86,12 +86,12 @@ fn main() {
         //     .endpoint(None)
         //     .enable_broadcast(true)
         //     .build();
-        // let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
+        let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
         // let backend_options = RedisStreamOptions::new("redis://127.0.0.1".to_string()).build();
 
         let fut = tokio_runtime.spawn(BurstMiddleware::create_proxies::<
             TokioChannelImpl,
-            RabbitMQMImpl,
+            RedisListImpl,
             _,
             _,
         >(burst_options, channel_options, backend_options));
@@ -105,10 +105,16 @@ fn main() {
                     Middleware::new(middleware, tokio_runtime.handle().clone()),
                 )
             })
-            .collect::<HashMap<u32, Middleware>>();
+            .collect::<HashMap<u32, Middleware<Bytes>>>();
 
-        let group_threads = group(actors);
-        threads.extend(group_threads);
+        for (worker_id, actor) in actors {
+            let thread = thread::spawn(move || {
+                info!("thread start: id={}", worker_id);
+                worker(actor);
+                info!("thread end: id={}", worker_id);
+            });
+            threads.push(thread);
+        }
     }
 
     for thread in threads {
@@ -116,31 +122,27 @@ fn main() {
     }
 }
 
-fn group(proxies: HashMap<u32, Middleware>) -> Vec<std::thread::JoinHandle<()>> {
-    let mut threads = Vec::with_capacity(proxies.len());
-    for (worker_id, proxy) in proxies {
-        let thread = thread::spawn(move || {
-            info!("thread start: id={}", worker_id);
-            worker(proxy);
-            info!("thread end: id={}", worker_id);
-        });
-        threads.push(thread);
-    }
-
-    threads
-}
-
-fn worker(burst_middleware: Middleware) {
+fn worker(burst_middleware: Middleware<Bytes>) {
     let burst_middleware = burst_middleware.get_actor_handle();
-    // let msg = format!("hello from worker {}", burst_middleware.info.worker_id);
-    // let data = Bytes::from(msg);
-    let data = Msg((0..PAYLOAD_SIZE as u32 / 4).collect());
 
+    let msg = format!("hello from worker {}", burst_middleware.info.worker_id);
+    let data = Bytes::from(msg);
     if let Some(msgs) = burst_middleware.gather(data, 0).unwrap() {
         for msg in msgs {
             info!(
                 "worker {} received message: {:?}",
                 burst_middleware.info.worker_id, msg
+            );
+        }
+    }
+
+    let data = Bytes::from(vec![0x00; PAYLOAD_SIZE]);
+    if let Some(msgs) = burst_middleware.gather(data, 0).unwrap() {
+        for msg in msgs {
+            info!(
+                "worker {} received message: {:?}",
+                burst_middleware.info.worker_id,
+                msg.len()
             );
         }
     }

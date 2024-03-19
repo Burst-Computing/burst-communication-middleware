@@ -87,7 +87,7 @@ fn main() {
     g2.join().unwrap();
 }
 
-fn worker(burst_middleware: Middleware) {
+fn worker(burst_middleware: Middleware<Bytes>) {
     let burst_middleware = burst_middleware.get_actor_handle();
     if burst_middleware.info.worker_id == 0 {
         info!("worker {} sending message", burst_middleware.info.worker_id);

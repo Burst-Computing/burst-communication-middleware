@@ -28,7 +28,7 @@ impl BytesMutChunkedMessageBody {
     }
 
     pub fn insert(&mut self, chunk_id: u32, chunk: Bytes) {
-        log::debug!("Inserting chunk {} of {}", chunk_id, self.num_chunks);
+        // log::debug!("Inserting chunk {} of {}", chunk_id, self.num_chunks);
 
         self.bytes_written += chunk.len();
         let chunk_buff = &mut self.chunked_buffs[chunk_id as usize];
@@ -44,11 +44,11 @@ impl BytesMutChunkedMessageBody {
         }
 
         self.num_chunks_stored += 1;
-        log::debug!(
-            "Received {} of {} chunks",
-            self.num_chunks_stored,
-            self.num_chunks
-        );
+        // log::debug!(
+        //     "Received {} of {} chunks",
+        //     self.num_chunks_stored,
+        //     self.num_chunks
+        // );
     }
 
     pub fn is_complete(&self) -> bool {

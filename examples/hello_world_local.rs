@@ -9,17 +9,17 @@ use std::{
     thread,
 };
 
-#[derive(Debug)]
-struct Str(String);
+#[derive(Debug, Clone)]
+struct StringMessage(String);
 
-impl From<Bytes> for Str {
+impl From<Bytes> for StringMessage {
     fn from(bytes: Bytes) -> Self {
-        Str(String::from_utf8_lossy(&bytes).to_string())
+        StringMessage(String::from_utf8_lossy(&bytes).to_string())
     }
 }
 
-impl From<Str> for Bytes {
-    fn from(val: Str) -> Self {
+impl From<StringMessage> for Bytes {
+    fn from(val: StringMessage) -> Self {
         Bytes::from(val.0)
     }
 }
@@ -65,7 +65,7 @@ fn main() {
                 Middleware::new(middleware, tokio_runtime.handle().clone()),
             )
         })
-        .collect::<HashMap<u32, Middleware>>();
+        .collect::<HashMap<u32, Middleware<StringMessage>>>();
 
     let p1 = actors.remove(&0).unwrap();
     let p2 = actors.remove(&1).unwrap();
@@ -88,12 +88,12 @@ fn main() {
     thread_2.join().unwrap();
 }
 
-fn worker(burst_middleware: Middleware) {
+fn worker(burst_middleware: Middleware<StringMessage>) {
     let burst_middleware = burst_middleware.get_actor_handle();
     info!("hi im worker 1: id={}", burst_middleware.info.worker_id);
     if burst_middleware.info.worker_id == 0 {
         info!("worker {} sending message", burst_middleware.info.worker_id);
-        let message = Str("hello world".to_string());
+        let message = StringMessage("hello world".to_string());
         burst_middleware.send(1, message).unwrap();
 
         let response = burst_middleware.recv(1).unwrap();
@@ -107,7 +107,7 @@ fn worker(burst_middleware: Middleware) {
             "worker {} received message: {:?}, data: {:?}",
             burst_middleware.info.worker_id, message, message
         );
-        let response = Str("bye!".to_string());
+        let response = StringMessage("bye!".to_string());
         burst_middleware.send(0, response).unwrap();
     }
 }

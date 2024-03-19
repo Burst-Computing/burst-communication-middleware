@@ -412,7 +412,7 @@ where
 {
     let data: [&[u8]; 2] = msg.into();
     let payload = data.concat();
-    // log::debug!("sending RemoteMessage: {:?}", payload);
+    log::debug!("RPUSH {:?}", key);
     connection.rpush(key, payload).await?;
     Ok(())
 }
@@ -421,9 +421,8 @@ async fn read_redis<C>(connection: &mut C, key: &str) -> Result<RemoteMessage>
 where
     C: ConnectionLike + Send,
 {
-    // log::debug!("waiting for RemoteMessage with key {:?}", key);
+    log::debug!("BLPOP {:?}", key);
     let (_, payload): (String, Vec<u8>) = connection.blpop(key, 0.0).await?;
-    // log::debug!("received RemoteMessage: {:?}", payload);
     let msg = RemoteMessage::from(payload);
     Ok(msg)
 }

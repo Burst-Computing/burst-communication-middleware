@@ -12,17 +12,17 @@ use std::{
     vec,
 };
 
-#[derive(Debug)]
-struct Str(String);
+#[derive(Debug, Clone)]
+struct StringMessage(String);
 
-impl From<Bytes> for Str {
+impl From<Bytes> for StringMessage {
     fn from(bytes: Bytes) -> Self {
-        Str(String::from_utf8_lossy(&bytes).to_string())
+        StringMessage(String::from_utf8_lossy(&bytes).to_string())
     }
 }
 
-impl From<Str> for Bytes {
-    fn from(val: Str) -> Self {
+impl From<StringMessage> for Bytes {
+    fn from(val: StringMessage) -> Self {
         Bytes::from(val.0)
     }
 }
@@ -35,7 +35,7 @@ fn handle_group(
 ) -> JoinHandle<()> {
     let fut = tokio_runtime.spawn(BurstMiddleware::create_proxies::<
         TokioChannelImpl,
-        RabbitMQMImpl,
+        RedisListImpl,
         _,
         _,
     >(
@@ -47,10 +47,10 @@ fn handle_group(
         TokioChannelOptions::new()
             .broadcast_channel_size(256)
             .build(),
-        RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-            .durable_queues(true)
-            .ack(true)
-            .build(),
+        // RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+        //     .durable_queues(true)
+        //     .ack(true)
+        //     .build(),
         // S3Options::new(env::var("S3_BUCKET").unwrap())
         //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
         //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
@@ -58,7 +58,7 @@ fn handle_group(
         //     .region(env::var("S3_REGION").unwrap())
         //     .endpoint(None)
         //     .build(),
-        // RedisListOptions::new("redis://127.0.0.1".to_string()),
+        RedisListOptions::new("redis://127.0.0.1".to_string()),
     ));
     let mut proxies = tokio_runtime.block_on(fut).unwrap().unwrap();
     let proxy = proxies.remove(&worker_id).unwrap();
@@ -97,12 +97,12 @@ fn main() {
     g2.join().unwrap();
 }
 
-fn worker(burst_middleware: Middleware) {
+fn worker(burst_middleware: Middleware<StringMessage>) {
     let burst_middleware = burst_middleware.get_actor_handle();
     info!("hi im worker with id={}", burst_middleware.info.worker_id);
     if burst_middleware.info.worker_id == 0 {
         info!("worker {} sending message", burst_middleware.info.worker_id);
-        let message = Str("hello world".to_string());
+        let message = StringMessage("hello world".to_string());
         burst_middleware.send(1, message).unwrap();
 
         info!(
@@ -124,7 +124,7 @@ fn worker(burst_middleware: Middleware) {
             "worker {} received message: {:?}",
             burst_middleware.info.worker_id, message
         );
-        let response = Str("bye!".to_string());
+        let response = StringMessage("bye!".to_string());
         info!(
             "worker {} sending response",
             burst_middleware.info.worker_id

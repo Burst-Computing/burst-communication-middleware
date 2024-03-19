@@ -4,7 +4,7 @@ use std::fmt::{Debug, Display};
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct LocalMessage<T> {
     pub metadata: MessageMetadata,
@@ -18,7 +18,7 @@ pub struct RemoteMessage {
     pub data: Bytes,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 #[repr(C)]
 pub struct MessageMetadata {
     pub sender_id: u32,

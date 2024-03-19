@@ -581,6 +581,11 @@ where
 
         if self.group.contains(&to) {
             // do local send always in one chunk
+            log::debug!(
+                "[Worker {}] Sending message to local worker {}",
+                self.worker_id,
+                to
+            );
             return self.local_send_receive.local_send(to, msg).await;
         } else if self.enable_message_chunking {
             // do remote send with chunking if enabled
@@ -589,13 +594,7 @@ where
             log::debug!("Chunked message in {} parts", chunked_messages.len());
             let futures = chunked_messages
                 .into_iter()
-                .map(|msg| {
-                    Self::local_send(
-                        to,
-                        Arc::clone(&self.local_send_receive),
-                        LocalMessage::from(msg),
-                    )
-                })
+                .map(|msg| Self::remote_send(to, Arc::clone(&self.remote_send_receive), msg))
                 .map(tokio::spawn)
                 .collect::<FuturesUnordered<_>>();
             futures::future::try_join_all(futures).await?;
@@ -610,17 +609,24 @@ where
     }
 
     async fn send_messages(&self, msgs: Vec<(u32, LocalMessage<T>)>) -> Result<()> {
-        let futures = msgs
-            .into_iter()
-            .flat_map(|(to, msg)| {
-                // TODO: handle local and remote messages in the same loop
-                if self.is_local(&to) {
-                    vec![Self::local_send(
-                        to,
-                        Arc::clone(&self.local_send_receive),
-                        msg,
-                    )]
-                } else {
+        let mut futures: FuturesUnordered<_> = FuturesUnordered::new();
+
+        let (local_msg, remote_msg): (_, Vec<_>) =
+            msgs.into_iter().partition(|(to, _)| self.is_local(to));
+
+        // Send local messages
+        futures.extend(
+            local_msg
+                .into_iter()
+                .map(|(to, msg)| Self::local_send(to, Arc::clone(&self.local_send_receive), msg))
+                .map(tokio::spawn),
+        );
+
+        // Send remote messages
+        futures.extend(
+            remote_msg
+                .into_iter()
+                .flat_map(|(to, msg)| {
                     let remote_message = RemoteMessage::from(msg);
                     if self.enable_message_chunking {
                         // do remote send with chunking if enabled
@@ -641,16 +647,11 @@ where
                             remote_message,
                         )]
                     }
-                }
-            })
-            .map(tokio::spawn)
-            .collect::<FuturesUnordered<_>>();
+                })
+                .map(tokio::spawn),
+        );
 
         futures::future::try_join_all(futures).await?;
-        Ok(())
-    }
-
-    async fn send_messages_to(&self, to: u32, msgs: Vec<LocalMessage<T>>) -> Result<()> {
         Ok(())
     }
 
@@ -907,19 +908,11 @@ where
                             messages.push(LocalMessage::from(msg));
                         } else {
                             // if not, spawn a new task to receive another message
-                            if self.group.contains(&id) {
-                                // TODO: handle local messages
-                                futures.push(tokio::spawn(Self::local_recv(
-                                    id,
-                                    Arc::clone(&self.local_send_receive),
-                                )));
-                            } else {
-                                futures.push(tokio::spawn(Self::remote_recv(
-                                    id,
-                                    Arc::clone(&self.remote_send_receive),
-                                )));
-                            };
-                        }
+                            futures.push(tokio::spawn(Self::remote_recv(
+                                id,
+                                Arc::clone(&self.remote_send_receive),
+                            )));
+                        };
                     }
                 }
                 Err(e) => {

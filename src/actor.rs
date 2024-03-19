@@ -44,6 +44,11 @@ enum ActorMessage<T> {
         payload: Vec<T>,
         respond_to: oneshot::Sender<Result<Vec<T>>>,
     },
+    Reduce {
+        payload: T,
+        op: fn(T, T) -> T,
+        respond_to: oneshot::Sender<Result<Option<T>>>,
+    },
 }
 
 impl<T> MiddlewareActor<T>
@@ -142,6 +147,20 @@ where
                     respond_to,
                     match result {
                         Ok(data) => Ok(data.into_iter().map(|m| m.data).collect::<Vec<T>>()),
+                        Err(e) => Err(e),
+                    },
+                );
+            }
+            ActorMessage::Reduce {
+                payload,
+                op,
+                respond_to,
+            } => {
+                let result = self.middleware.reduce(payload, op).await;
+                self.send_log(
+                    respond_to,
+                    match result {
+                        Ok(data) => Ok(data),
                         Err(e) => Err(e),
                     },
                 );
@@ -246,6 +265,18 @@ where
 
         self.sender.blocking_send(ActorMessage::AllToAll {
             payload: data,
+            respond_to: send,
+        })?;
+
+        recv.blocking_recv()?
+    }
+
+    pub fn reduce(&self, data: T, op: fn(T, T) -> T) -> Result<Option<T>> {
+        let (send, recv) = oneshot::channel();
+
+        self.sender.blocking_send(ActorMessage::Reduce {
+            payload: data,
+            op,
             respond_to: send,
         })?;
 
