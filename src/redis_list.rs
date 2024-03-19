@@ -6,8 +6,9 @@ use deadpool_redis::{Config, Pool, Runtime};
 use redis::{aio::ConnectionLike, AsyncCommands};
 
 use crate::{
-    impl_chainable_setter, BroadcastProxy, BroadcastReceiveProxy, BroadcastSendProxy, BurstOptions,
-    Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory, SendReceiveProxy,
+    impl_chainable_setter, BurstOptions, RemoteBroadcastProxy, RemoteBroadcastReceiveProxy,
+    RemoteBroadcastSendProxy, RemoteMessage, RemoteReceiveProxy, RemoteSendProxy,
+    RemoteSendReceiveFactory, RemoteSendReceiveProxy, Result,
 };
 
 #[derive(Clone, Debug)]
@@ -47,11 +48,19 @@ impl Default for RedisListOptions {
 pub struct RedisListImpl;
 
 #[async_trait]
-impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
-    async fn create_proxies(
+impl RemoteSendReceiveFactory<RedisListOptions> for RedisListImpl {
+    async fn create_remote_proxies(
         burst_options: Arc<BurstOptions>,
         redis_options: RedisListOptions,
-    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>> {
+    ) -> Result<
+        HashMap<
+            u32,
+            (
+                Box<dyn RemoteSendReceiveProxy>,
+                Box<dyn RemoteBroadcastProxy>,
+            ),
+        >,
+    > {
         let redis_options = Arc::new(redis_options);
 
         // create redis pool with deadpool
@@ -94,8 +103,8 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
             proxies.insert(
                 proxy.worker_id,
                 (
-                    Box::new(proxy) as Box<dyn SendReceiveProxy>,
-                    Box::new(broadcast_proxy) as Box<dyn BroadcastProxy>,
+                    Box::new(proxy) as Box<dyn RemoteSendReceiveProxy>,
+                    Box::new(broadcast_proxy) as Box<dyn RemoteBroadcastProxy>,
                 ),
             );
         });
@@ -108,8 +117,8 @@ impl SendReceiveFactory<RedisListOptions> for RedisListImpl {
 
 pub struct RedisListProxy {
     worker_id: u32,
-    receiver: Box<dyn ReceiveProxy>,
-    sender: Box<dyn SendProxy>,
+    receiver: Box<dyn RemoteReceiveProxy>,
+    sender: Box<dyn RemoteSendProxy>,
 }
 
 pub struct RedisListSendProxy {
@@ -126,19 +135,19 @@ pub struct RedisListReceiveProxy {
     worker_id: u32,
 }
 
-impl SendReceiveProxy for RedisListProxy {}
+impl RemoteSendReceiveProxy for RedisListProxy {}
 
 #[async_trait]
-impl SendProxy for RedisListProxy {
-    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
-        self.sender.send(dest, msg).await
+impl RemoteSendProxy for RedisListProxy {
+    async fn remote_send(&self, dest: u32, msg: RemoteMessage) -> Result<()> {
+        self.sender.remote_send(dest, msg).await
     }
 }
 
 #[async_trait]
-impl ReceiveProxy for RedisListProxy {
-    async fn recv(&self, source: u32) -> Result<Message> {
-        self.receiver.recv(source).await
+impl RemoteReceiveProxy for RedisListProxy {
+    async fn remote_recv(&self, source: u32) -> Result<RemoteMessage> {
+        self.receiver.remote_recv(source).await
     }
 }
 
@@ -184,8 +193,8 @@ impl RedisListSendProxy {
 }
 
 #[async_trait]
-impl SendProxy for RedisListSendProxy {
-    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
+impl RemoteSendProxy for RedisListSendProxy {
+    async fn remote_send(&self, dest: u32, msg: RemoteMessage) -> Result<()> {
         let con = self.redis_pool.get().await?;
         Ok(send_direct(
             con,
@@ -216,8 +225,8 @@ impl RedisListReceiveProxy {
 }
 
 #[async_trait]
-impl ReceiveProxy for RedisListReceiveProxy {
-    async fn recv(&self, source: u32) -> Result<Message> {
+impl RemoteReceiveProxy for RedisListReceiveProxy {
+    async fn remote_recv(&self, source: u32) -> Result<RemoteMessage> {
         let mut con = self.redis_pool.get().await?;
         let msg = read_redis(
             &mut con,
@@ -236,8 +245,8 @@ impl ReceiveProxy for RedisListReceiveProxy {
 // BROADCAST PROXIES
 
 pub struct RedisListBroadcastProxy {
-    broadcast_sender: Box<dyn BroadcastSendProxy>,
-    broadcast_receiver: Box<dyn BroadcastReceiveProxy>,
+    broadcast_sender: Box<dyn RemoteBroadcastSendProxy>,
+    broadcast_receiver: Box<dyn RemoteBroadcastReceiveProxy>,
 }
 
 pub struct RedisListBroadcastSendProxy {
@@ -251,7 +260,7 @@ pub struct RedisListBroadcastReceiveProxy {
     broadcast_recv_key: String,
 }
 
-impl BroadcastProxy for RedisListBroadcastProxy {}
+impl RemoteBroadcastProxy for RedisListBroadcastProxy {}
 
 impl RedisListBroadcastProxy {
     pub async fn new(
@@ -277,27 +286,27 @@ impl RedisListBroadcastProxy {
 }
 
 #[async_trait]
-impl BroadcastSendProxy for RedisListBroadcastProxy {
-    async fn broadcast_send(&self, msg: Message) -> Result<()> {
-        self.broadcast_sender.broadcast_send(msg).await
+impl RemoteBroadcastSendProxy for RedisListBroadcastProxy {
+    async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
+        self.broadcast_sender.remote_broadcast_send(msg).await
     }
 }
 
 #[async_trait]
-impl BroadcastReceiveProxy for RedisListBroadcastProxy {
-    async fn broadcast_recv(&self) -> Result<Message> {
-        self.broadcast_receiver.broadcast_recv().await
+impl RemoteBroadcastReceiveProxy for RedisListBroadcastProxy {
+    async fn remote_broadcast_recv(&self) -> Result<RemoteMessage> {
+        self.broadcast_receiver.remote_broadcast_recv().await
     }
 }
 
 #[async_trait]
-impl BroadcastSendProxy for RedisListBroadcastSendProxy {
-    async fn broadcast_send(&self, msg: Message) -> Result<()> {
+impl RemoteBroadcastSendProxy for RedisListBroadcastSendProxy {
+    async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
         let mut conn = self.redis_pool.get().await?;
 
         let bcast_key = format!(
             "{}:broadcast:{}:{}",
-            self.burst_options.burst_id, msg.counter, msg.chunk_id
+            self.burst_options.burst_id, msg.metadata.counter, msg.metadata.chunk_id
         );
         log::debug!("SET {:?} {}:header {}:payload", msg, bcast_key, bcast_key);
         let [header, payload]: [&[u8]; 2] = (&msg).into();
@@ -335,20 +344,20 @@ impl RedisListBroadcastSendProxy {
 }
 
 #[async_trait]
-impl BroadcastReceiveProxy for RedisListBroadcastReceiveProxy {
-    async fn broadcast_recv(&self) -> Result<Message> {
+impl RemoteBroadcastReceiveProxy for RedisListBroadcastReceiveProxy {
+    async fn remote_broadcast_recv(&self) -> Result<RemoteMessage> {
         let mut conn = self.redis_pool.get().await?;
 
-        // wait for the next message containing the broadcast key
+        // wait for the next RemoteMessage containing the broadcast key
         log::debug!("BLPOP on key: {:?}", &self.broadcast_recv_key);
         let (_, bcast_key): (String, String) =
             conn.blpop(&self.broadcast_recv_key, 0.0).await.unwrap();
         // log::debug!("Received broadcast key: {:?}", &bcast_key);
 
-        // get the message header and body from redis using GET
+        // get the RemoteMessage header and body from redis using GET
         let header: Vec<u8> = conn.get(format!("{}:header", bcast_key)).await.unwrap();
         let payload: Vec<u8> = conn.get(format!("{}:payload", bcast_key)).await.unwrap();
-        let msg = Message::from((header, payload));
+        let msg = RemoteMessage::from((header, payload));
         Ok(msg)
     }
 }
@@ -375,7 +384,7 @@ impl RedisListBroadcastReceiveProxy {
 
 async fn send_direct<C>(
     connection: C,
-    msg: Message,
+    msg: RemoteMessage,
     source: u32,
     dest: u32,
     redis_options: &RedisListOptions,
@@ -397,25 +406,24 @@ where
     .await
 }
 
-async fn send_redis<C>(mut connection: C, msg: &Message, key: String) -> Result<()>
+async fn send_redis<C>(mut connection: C, msg: &RemoteMessage, key: String) -> Result<()>
 where
     C: ConnectionLike + Send,
 {
     let data: [&[u8]; 2] = msg.into();
     let payload = data.concat();
-    // log::debug!("sending message: {:?}", payload);
+    log::debug!("RPUSH {:?}", key);
     connection.rpush(key, payload).await?;
     Ok(())
 }
 
-async fn read_redis<C>(connection: &mut C, key: &str) -> Result<Message>
+async fn read_redis<C>(connection: &mut C, key: &str) -> Result<RemoteMessage>
 where
     C: ConnectionLike + Send,
 {
-    // log::debug!("waiting for message with key {:?}", key);
+    log::debug!("BLPOP {:?}", key);
     let (_, payload): (String, Vec<u8>) = connection.blpop(key, 0.0).await?;
-    // log::debug!("received message: {:?}", payload);
-    let msg = Message::from(payload);
+    let msg = RemoteMessage::from(payload);
     Ok(msg)
 }
 

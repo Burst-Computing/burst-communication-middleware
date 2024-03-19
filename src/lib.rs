@@ -1,7 +1,7 @@
 mod actor;
 mod burst_message_relay;
 mod chunk_store;
-mod message_store;
+mod message_buffer;
 mod middleware;
 mod rabbitmq;
 mod redis_list;
@@ -13,11 +13,13 @@ mod utils;
 
 pub use actor::*;
 pub use burst_message_relay::*;
+use bytes::Bytes;
 pub use middleware::*;
 pub use rabbitmq::*;
 pub use redis_list::*;
 pub use redis_stream::*;
 pub use s3::*;
+use tokio::runtime::{Handle, Runtime};
 pub use tokio_channel::*;
 pub use types::*;
 
@@ -63,10 +65,41 @@ pub enum Backend {
     MessageRelay,
 }
 
-pub fn create_actors(
+pub struct Middleware<T> {
+    middleware: BurstMiddleware<T>,
+    runtime: Handle,
+}
+
+impl<T> Middleware<T>
+where
+    T: From<Bytes> + Into<Bytes> + Send + Clone + 'static,
+{
+    pub fn new(middleware: BurstMiddleware<T>, runtime: Handle) -> Self {
+        Self {
+            middleware,
+            runtime,
+        }
+    }
+
+    pub fn get_actor_handle(self) -> MiddlewareActorHandle<T>
+    where
+        T: From<Bytes> + Into<Bytes> + Sync + Send + 'static,
+    {
+        MiddlewareActorHandle::new(self.middleware, &self.runtime)
+    }
+
+    pub fn info(&self) -> BurstInfo {
+        self.middleware.info()
+    }
+}
+
+pub fn create_actors<T>(
     conf: Config,
-    tokio_runtime: &tokio::runtime::Runtime,
-) -> Result<HashMap<u32, MiddlewareActorHandle>> {
+    tokio_runtime: &Runtime,
+) -> Result<HashMap<u32, Middleware<T>>>
+where
+    T: From<Bytes> + Into<Bytes> + Send + Sync + Clone + 'static,
+{
     let burst_options = BurstOptions::new(
         conf.burst_size,
         conf.group_ranges,
@@ -175,9 +208,11 @@ pub fn create_actors(
 
     Ok(actors?
         .into_iter()
-        .map(|(id, proxy)| {
-            let actor = MiddlewareActorHandle::new(proxy, tokio_runtime);
-            (id, actor)
+        .map(|(worker_id, middleware)| {
+            (
+                worker_id,
+                Middleware::new(middleware, tokio_runtime.handle().clone()),
+            )
         })
-        .collect::<HashMap<u32, MiddlewareActorHandle>>())
+        .collect())
 }

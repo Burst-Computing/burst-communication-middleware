@@ -1,50 +1,61 @@
 use crate::middleware::BurstMiddleware;
-use crate::types::{Message, Result};
+use crate::types::Result;
 use crate::BurstInfo;
 use bytes::Bytes;
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    runtime::Handle,
+    sync::{mpsc, oneshot},
+};
 
 // https://ryhl.io/blog/actors-with-tokio/
 
-struct MiddlewareActor {
-    receiver: mpsc::Receiver<ActorMessage>,
-    middleware: BurstMiddleware,
+struct MiddlewareActor<T> {
+    receiver: mpsc::Receiver<ActorMessage<T>>,
+    middleware: BurstMiddleware<T>,
 }
 
 #[derive(Debug)]
-enum ActorMessage {
+enum ActorMessage<T> {
     SendMessage {
-        payload: Bytes,
+        payload: T,
         worker_dest: u32,
         respond_to: oneshot::Sender<Result<()>>,
     },
     ReceiveMessage {
         from: u32,
-        respond_to: oneshot::Sender<Result<Message>>,
+        respond_to: oneshot::Sender<Result<T>>,
     },
     Broadcast {
-        payload: Option<Bytes>,
+        payload: Option<T>,
         root: u32,
-        respond_to: oneshot::Sender<Result<Message>>,
+        respond_to: oneshot::Sender<Result<T>>,
     },
     Scatter {
-        payloads: Option<Vec<Bytes>>,
+        payloads: Option<Vec<T>>,
         root: u32,
-        respond_to: oneshot::Sender<Result<Message>>,
+        respond_to: oneshot::Sender<Result<T>>,
     },
     Gather {
-        payload: Bytes,
+        payload: T,
         root: u32,
-        respond_to: oneshot::Sender<Result<Option<Vec<Message>>>>,
+        respond_to: oneshot::Sender<Result<Option<Vec<T>>>>,
     },
     AllToAll {
-        payload: Vec<Bytes>,
-        respond_to: oneshot::Sender<Result<Vec<Message>>>,
+        payload: Vec<T>,
+        respond_to: oneshot::Sender<Result<Vec<T>>>,
+    },
+    Reduce {
+        payload: T,
+        op: fn(T, T) -> T,
+        respond_to: oneshot::Sender<Result<Option<T>>>,
     },
 }
 
-impl MiddlewareActor {
-    fn new(receiver: mpsc::Receiver<ActorMessage>, middleware: BurstMiddleware) -> Self {
+impl<T> MiddlewareActor<T>
+where
+    T: From<Bytes> + Into<Bytes> + Send + Sync + Clone + 'static,
+{
+    fn new(receiver: mpsc::Receiver<ActorMessage<T>>, middleware: BurstMiddleware<T>) -> Self {
         MiddlewareActor {
             receiver,
             middleware,
@@ -62,7 +73,7 @@ impl MiddlewareActor {
         }
     }
 
-    async fn handle_message(&mut self, msg: ActorMessage) {
+    async fn handle_message(&mut self, msg: ActorMessage<T>) {
         match msg {
             ActorMessage::SendMessage {
                 payload,
@@ -70,27 +81,17 @@ impl MiddlewareActor {
                 respond_to,
             } => {
                 let result = self.middleware.send(worker_dest, payload).await;
-                match respond_to.send(result) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        log::error!(
-                            "Failed to send response to {}",
-                            self.middleware.info().worker_id
-                        );
-                    }
-                };
+                self.send_log(respond_to, result);
             }
             ActorMessage::ReceiveMessage { from, respond_to } => {
                 let result = self.middleware.recv(from).await;
-                match respond_to.send(result) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        log::error!(
-                            "Failed to send response to {}",
-                            self.middleware.info().worker_id
-                        );
-                    }
-                };
+                self.send_log(
+                    respond_to,
+                    match result {
+                        Ok(data) => Ok(data.data),
+                        Err(e) => Err(e),
+                    },
+                );
             }
             ActorMessage::Broadcast {
                 root,
@@ -98,15 +99,13 @@ impl MiddlewareActor {
                 respond_to,
             } => {
                 let result = self.middleware.broadcast(payload, root).await;
-                match respond_to.send(result) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        log::error!(
-                            "Failed to send response to {}",
-                            self.middleware.info().worker_id
-                        );
-                    }
-                };
+                self.send_log(
+                    respond_to,
+                    match result {
+                        Ok(data) => Ok(data.data),
+                        Err(e) => Err(e),
+                    },
+                );
             }
             ActorMessage::Scatter {
                 payloads,
@@ -114,15 +113,13 @@ impl MiddlewareActor {
                 respond_to,
             } => {
                 let result = self.middleware.scatter(payloads, root).await;
-                match respond_to.send(result) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        log::error!(
-                            "Failed to send response to {}",
-                            self.middleware.info().worker_id
-                        );
-                    }
-                };
+                self.send_log(
+                    respond_to,
+                    match result {
+                        Ok(data) => Ok(data.data),
+                        Err(e) => Err(e),
+                    },
+                );
             }
             ActorMessage::Gather {
                 payload,
@@ -130,43 +127,68 @@ impl MiddlewareActor {
                 respond_to,
             } => {
                 let result = self.middleware.gather(payload, root).await;
-                match respond_to.send(result) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        log::error!(
-                            "Failed to send response to {}",
-                            self.middleware.info().worker_id
-                        );
-                    }
-                };
+                self.send_log(
+                    respond_to,
+                    match result {
+                        Ok(Some(data)) => {
+                            Ok(Some(data.into_iter().map(|m| m.data).collect::<Vec<T>>()))
+                        }
+                        Ok(None) => Ok(None),
+                        Err(e) => Err(e),
+                    },
+                );
             }
             ActorMessage::AllToAll {
                 payload,
                 respond_to,
             } => {
                 let result = self.middleware.all_to_all(payload).await;
-                match respond_to.send(result) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        log::error!(
-                            "Failed to send response to {}",
-                            self.middleware.info().worker_id
-                        );
-                    }
-                };
+                self.send_log(
+                    respond_to,
+                    match result {
+                        Ok(data) => Ok(data.into_iter().map(|m| m.data).collect::<Vec<T>>()),
+                        Err(e) => Err(e),
+                    },
+                );
             }
+            ActorMessage::Reduce {
+                payload,
+                op,
+                respond_to,
+            } => {
+                let result = self.middleware.reduce(payload, op).await;
+                self.send_log(
+                    respond_to,
+                    match result {
+                        Ok(data) => Ok(data),
+                        Err(e) => Err(e),
+                    },
+                );
+            }
+        }
+    }
+
+    fn send_log<M>(&self, send_to: oneshot::Sender<M>, msg: M) {
+        if send_to.send(msg).is_err() {
+            log::error!(
+                "MiddlewareActor id={} failed to send message",
+                self.middleware.info().worker_id,
+            );
         }
     }
 }
 
 #[derive(Clone)]
-pub struct MiddlewareActorHandle {
+pub struct MiddlewareActorHandle<T> {
     pub info: BurstInfo,
-    sender: mpsc::Sender<ActorMessage>,
+    sender: mpsc::Sender<ActorMessage<T>>,
 }
 
-impl MiddlewareActorHandle {
-    pub fn new(middleware: BurstMiddleware, tokio_runtime: &tokio::runtime::Runtime) -> Self {
+impl<T> MiddlewareActorHandle<T>
+where
+    T: From<Bytes> + Into<Bytes> + Send + Sync + Clone + 'static,
+{
+    pub fn new(middleware: BurstMiddleware<T>, tokio_runtime: &Handle) -> Self {
         let (sender, receiver) = mpsc::channel(1);
         let info = middleware.info().clone();
 
@@ -176,7 +198,10 @@ impl MiddlewareActorHandle {
         Self { sender, info }
     }
 
-    pub fn send(&self, dest: u32, data: Bytes) -> Result<()> {
+    pub fn send(&self, dest: u32, data: T) -> Result<()>
+    where
+        T: Into<Bytes>,
+    {
         let (send, recv) = oneshot::channel();
 
         self.sender.blocking_send(ActorMessage::SendMessage {
@@ -188,7 +213,7 @@ impl MiddlewareActorHandle {
         recv.blocking_recv()?
     }
 
-    pub fn recv(&self, from: u32) -> Result<Message> {
+    pub fn recv(&self, from: u32) -> Result<T> {
         let (send, recv) = oneshot::channel();
 
         self.sender.blocking_send(ActorMessage::ReceiveMessage {
@@ -199,7 +224,7 @@ impl MiddlewareActorHandle {
         recv.blocking_recv()?
     }
 
-    pub fn broadcast(&self, data: Option<Bytes>, root: u32) -> Result<Message> {
+    pub fn broadcast(&self, data: Option<T>, root: u32) -> Result<T> {
         let (send, recv) = oneshot::channel();
 
         self.sender.blocking_send(ActorMessage::Broadcast {
@@ -211,7 +236,7 @@ impl MiddlewareActorHandle {
         recv.blocking_recv()?
     }
 
-    pub fn gather(&self, data: Bytes, root: u32) -> Result<Option<Vec<Message>>> {
+    pub fn gather(&self, data: T, root: u32) -> Result<Option<Vec<T>>> {
         let (send, recv) = oneshot::channel();
 
         self.sender.blocking_send(ActorMessage::Gather {
@@ -223,7 +248,7 @@ impl MiddlewareActorHandle {
         recv.blocking_recv()?
     }
 
-    pub fn scatter(&self, data: Option<Vec<Bytes>>, root: u32) -> Result<Message> {
+    pub fn scatter(&self, data: Option<Vec<T>>, root: u32) -> Result<T> {
         let (send, recv) = oneshot::channel();
 
         self.sender.blocking_send(ActorMessage::Scatter {
@@ -235,11 +260,23 @@ impl MiddlewareActorHandle {
         recv.blocking_recv()?
     }
 
-    pub fn all_to_all(&self, data: Vec<Bytes>) -> Result<Vec<Message>> {
+    pub fn all_to_all(&self, data: Vec<T>) -> Result<Vec<T>> {
         let (send, recv) = oneshot::channel();
 
         self.sender.blocking_send(ActorMessage::AllToAll {
             payload: data,
+            respond_to: send,
+        })?;
+
+        recv.blocking_recv()?
+    }
+
+    pub fn reduce(&self, data: T, op: fn(T, T) -> T) -> Result<Option<T>> {
+        let (send, recv) = oneshot::channel();
+
+        self.sender.blocking_send(ActorMessage::Reduce {
+            payload: data,
+            op,
             respond_to: send,
         })?;
 

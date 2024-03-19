@@ -1,6 +1,6 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, MiddlewareActorHandle, RabbitMQMImpl, RabbitMQOptions,
-    TokioChannelImpl, TokioChannelOptions,
+    BurstMiddleware, BurstOptions, Middleware, MiddlewareActorHandle, RabbitMQMImpl,
+    RabbitMQOptions, TokioChannelImpl, TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -8,6 +8,21 @@ use std::{
     collections::{HashMap, HashSet},
     thread,
 };
+
+#[derive(Debug, Clone)]
+struct StringMessage(String);
+
+impl From<Bytes> for StringMessage {
+    fn from(bytes: Bytes) -> Self {
+        StringMessage(String::from_utf8_lossy(&bytes).to_string())
+    }
+}
+
+impl From<StringMessage> for Bytes {
+    fn from(val: StringMessage) -> Self {
+        Bytes::from(val.0)
+    }
+}
 
 fn main() {
     env_logger::init();
@@ -44,26 +59,28 @@ fn main() {
 
     let mut actors = proxies
         .into_iter()
-        .map(|(worker_id, mid)| {
-            let actor = MiddlewareActorHandle::new(mid, &tokio_runtime);
-            (worker_id, actor)
+        .map(|(worker_id, middleware)| {
+            (
+                worker_id,
+                Middleware::new(middleware, tokio_runtime.handle().clone()),
+            )
         })
-        .collect::<HashMap<u32, MiddlewareActorHandle>>();
+        .collect::<HashMap<u32, Middleware<StringMessage>>>();
 
     let p1 = actors.remove(&0).unwrap();
     let p2 = actors.remove(&1).unwrap();
 
     let thread_1 = thread::spawn(move || {
-        let worker_id = p1.info.worker_id;
+        let worker_id = p1.info().worker_id;
         info!("thread start: id={}", worker_id);
-        worker(p1).unwrap();
+        worker(p1);
         info!("thread end: id={}", worker_id);
     });
 
     let thread_2 = thread::spawn(move || {
-        let worker_id = p2.info.worker_id;
+        let worker_id = p2.info().worker_id;
         info!("thread start: id={}", worker_id);
-        worker(p2).unwrap();
+        worker(p2);
         info!("thread end: id={}", worker_id);
     });
 
@@ -71,28 +88,26 @@ fn main() {
     thread_2.join().unwrap();
 }
 
-fn worker(burst_middleware: MiddlewareActorHandle) -> Result<(), Box<dyn std::error::Error>> {
+fn worker(burst_middleware: Middleware<StringMessage>) {
+    let burst_middleware = burst_middleware.get_actor_handle();
     info!("hi im worker 1: id={}", burst_middleware.info.worker_id);
     if burst_middleware.info.worker_id == 0 {
         info!("worker {} sending message", burst_middleware.info.worker_id);
-        let message = "hello world".to_string();
-        let payload = Bytes::from(message);
-        burst_middleware.send(1, payload).unwrap();
+        let message = StringMessage("hello world".to_string());
+        burst_middleware.send(1, message).unwrap();
 
         let response = burst_middleware.recv(1).unwrap();
         info!(
             "worker {} received message: {:?}, data: {:?}",
-            burst_middleware.info.worker_id, response, response.data
+            burst_middleware.info.worker_id, response, response
         );
     } else {
         let message = burst_middleware.recv(0).unwrap();
         info!(
             "worker {} received message: {:?}, data: {:?}",
-            burst_middleware.info.worker_id, message, message.data
+            burst_middleware.info.worker_id, message, message
         );
-        let response = "bye!".to_string();
-        let payload = Bytes::from(response);
-        burst_middleware.send(0, payload).unwrap();
+        let response = StringMessage("bye!".to_string());
+        burst_middleware.send(0, response).unwrap();
     }
-    Ok(())
 }

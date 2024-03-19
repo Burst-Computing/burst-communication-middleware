@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use burst_message_relay::client::{client::Client, connection_pool::ConnectionPool};
 
 use crate::{
-    impl_chainable_setter, BroadcastProxy, BroadcastReceiveProxy, BroadcastSendProxy, BurstOptions,
-    CollectiveType, Error, Message, ReceiveProxy, Result, SendProxy, SendReceiveFactory,
-    SendReceiveProxy,
+    impl_chainable_setter, BurstOptions, CollectiveType, Error, RemoteBroadcastProxy,
+    RemoteBroadcastReceiveProxy, RemoteBroadcastSendProxy, RemoteMessage, RemoteReceiveProxy,
+    RemoteSendProxy, RemoteSendReceiveFactory, RemoteSendReceiveProxy, Result,
 };
 
 #[derive(Clone)]
@@ -43,11 +43,19 @@ impl Default for BurstMessageRelayOptions {
 pub struct BurstMessageRelayImpl;
 
 #[async_trait]
-impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
-    async fn create_proxies(
+impl RemoteSendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
+    async fn create_remote_proxies(
         burst_options: Arc<BurstOptions>,
         server_options: BurstMessageRelayOptions,
-    ) -> Result<HashMap<u32, (Box<dyn SendReceiveProxy>, Box<dyn BroadcastProxy>)>> {
+    ) -> Result<
+        HashMap<
+            u32,
+            (
+                Box<dyn RemoteSendReceiveProxy>,
+                Box<dyn RemoteBroadcastProxy>,
+            ),
+        >,
+    > {
         let current_group = burst_options
             .group_ranges
             .get(&burst_options.group_id)
@@ -93,8 +101,8 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
             proxies.insert(
                 proxy.worker_id,
                 (
-                    Box::new(proxy) as Box<dyn SendReceiveProxy>,
-                    Box::new(broadcast_proxy) as Box<dyn BroadcastProxy>,
+                    Box::new(proxy) as Box<dyn RemoteSendReceiveProxy>,
+                    Box::new(broadcast_proxy) as Box<dyn RemoteBroadcastProxy>,
                 ),
             );
         });
@@ -106,8 +114,8 @@ impl SendReceiveFactory<BurstMessageRelayOptions> for BurstMessageRelayImpl {
 // DIRECT PROXIES
 
 pub struct StreamServerProxy {
-    receiver: Box<dyn ReceiveProxy>,
-    sender: Box<dyn SendProxy>,
+    receiver: Box<dyn RemoteReceiveProxy>,
+    sender: Box<dyn RemoteSendProxy>,
     worker_id: u32,
 }
 
@@ -120,19 +128,19 @@ pub struct StreamServerReceiveProxy {
     connection_pool: Arc<ConnectionPool>,
 }
 
-impl SendReceiveProxy for StreamServerProxy {}
+impl RemoteSendReceiveProxy for StreamServerProxy {}
 
 #[async_trait]
-impl SendProxy for StreamServerProxy {
-    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
-        self.sender.send(dest, msg).await
+impl RemoteSendProxy for StreamServerProxy {
+    async fn remote_send(&self, dest: u32, msg: RemoteMessage) -> Result<()> {
+        self.sender.remote_send(dest, msg).await
     }
 }
 
 #[async_trait]
-impl ReceiveProxy for StreamServerProxy {
-    async fn recv(&self, source: u32) -> Result<Message> {
-        self.receiver.recv(source).await
+impl RemoteReceiveProxy for StreamServerProxy {
+    async fn remote_recv(&self, source: u32) -> Result<RemoteMessage> {
+        self.receiver.remote_recv(source).await
     }
 }
 
@@ -149,9 +157,9 @@ impl StreamServerProxy {
 }
 
 #[async_trait]
-impl SendProxy for StreamServerSendProxy {
-    async fn send(&self, dest: u32, msg: Message) -> Result<()> {
-        if msg.collective == CollectiveType::Broadcast {
+impl RemoteSendProxy for StreamServerSendProxy {
+    async fn remote_send(&self, dest: u32, msg: RemoteMessage) -> Result<()> {
+        if msg.metadata.collective == CollectiveType::Broadcast {
             Err("Cannot send broadcast message to a single destination".into())
         } else {
             let data: &[&[u8]; 2] = &(&msg).into();
@@ -170,11 +178,11 @@ impl StreamServerSendProxy {
 }
 
 #[async_trait]
-impl ReceiveProxy for StreamServerReceiveProxy {
-    async fn recv(&self, _source: u32) -> Result<Message> {
+impl RemoteReceiveProxy for StreamServerReceiveProxy {
+    async fn remote_recv(&self, _source: u32) -> Result<RemoteMessage> {
         let mut client = Client::new(self.connection_pool.clone());
         let data = client.recv(self.worker_id).await;
-        Ok(Message::from(data))
+        Ok(RemoteMessage::from(data))
     }
 }
 
@@ -190,8 +198,8 @@ impl StreamServerReceiveProxy {
 // BROADCAST PROXIES
 
 pub struct StreamServerBroadcastProxy {
-    broadcast_sender: Box<dyn BroadcastSendProxy>,
-    broadcast_receiver: Box<dyn BroadcastReceiveProxy>,
+    broadcast_sender: Box<dyn RemoteBroadcastSendProxy>,
+    broadcast_receiver: Box<dyn RemoteBroadcastReceiveProxy>,
 }
 
 pub struct StreamServerBroadcastSendProxy {
@@ -204,19 +212,19 @@ pub struct StreamServerBroadcastReceiveProxy {
     group_id: String,
 }
 
-impl BroadcastProxy for StreamServerBroadcastProxy {}
+impl RemoteBroadcastProxy for StreamServerBroadcastProxy {}
 
 #[async_trait]
-impl BroadcastSendProxy for StreamServerBroadcastProxy {
-    async fn broadcast_send(&self, msg: Message) -> Result<()> {
-        self.broadcast_sender.broadcast_send(msg).await
+impl RemoteBroadcastSendProxy for StreamServerBroadcastProxy {
+    async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
+        self.broadcast_sender.remote_broadcast_send(msg).await
     }
 }
 
 #[async_trait]
-impl BroadcastReceiveProxy for StreamServerBroadcastProxy {
-    async fn broadcast_recv(&self) -> Result<Message> {
-        self.broadcast_receiver.broadcast_recv().await
+impl RemoteBroadcastReceiveProxy for StreamServerBroadcastProxy {
+    async fn remote_broadcast_recv(&self) -> Result<RemoteMessage> {
+        self.broadcast_receiver.remote_broadcast_recv().await
     }
 }
 
@@ -254,9 +262,9 @@ impl StreamServerBroadcastSendProxy {
 }
 
 #[async_trait]
-impl BroadcastSendProxy for StreamServerBroadcastSendProxy {
-    async fn broadcast_send(&self, msg: Message) -> Result<()> {
-        if msg.collective != CollectiveType::Broadcast {
+impl RemoteBroadcastSendProxy for StreamServerBroadcastSendProxy {
+    async fn remote_broadcast_send(&self, msg: RemoteMessage) -> Result<()> {
+        if msg.metadata.collective != CollectiveType::Broadcast {
             Err("Cannot send non-broadcast message to broadcast".into())
         } else {
             let mut tasks = Vec::new();
@@ -289,11 +297,11 @@ impl StreamServerBroadcastReceiveProxy {
 }
 
 #[async_trait]
-impl BroadcastReceiveProxy for StreamServerBroadcastReceiveProxy {
-    async fn broadcast_recv(&self) -> Result<Message> {
+impl RemoteBroadcastReceiveProxy for StreamServerBroadcastReceiveProxy {
+    async fn remote_broadcast_recv(&self) -> Result<RemoteMessage> {
         let mut client = Client::new(self.connection_pool.clone());
         let data = client.broadcast(&self.group_id).await;
-        Ok(Message::from(data))
+        Ok(RemoteMessage::from(data))
     }
 }
 

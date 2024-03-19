@@ -1,7 +1,7 @@
 use burst_communication_middleware::{
-    BurstMiddleware, BurstOptions, Message, MiddlewareActorHandle, RabbitMQMImpl, RabbitMQOptions,
-    RedisListImpl, RedisListOptions, RedisStreamOptions, S3Impl, S3Options, TokioChannelImpl,
-    TokioChannelOptions,
+    BurstMiddleware, BurstOptions, Middleware, MiddlewareActorHandle, RabbitMQMImpl,
+    RabbitMQOptions, RedisListImpl, RedisListOptions, RedisStreamOptions, S3Impl, S3Options,
+    TokioChannelImpl, TokioChannelOptions,
 };
 use bytes::Bytes;
 use log::{error, info};
@@ -48,10 +48,10 @@ fn main() {
             .broadcast_channel_size(256)
             .build();
 
-        let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
-            .durable_queues(true)
-            .ack(true)
-            .build();
+        // let backend_options = RabbitMQOptions::new("amqp://guest:guest@localhost:5672".to_string())
+        //     .durable_queues(true)
+        //     .ack(true)
+        //     .build();
         // let s3_options = S3Options::new(env::var("S3_BUCKET").unwrap())
         //     .access_key_id(env::var("AWS_ACCESS_KEY_ID").unwrap())
         //     .secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").unwrap())
@@ -60,11 +60,11 @@ fn main() {
         //     .endpoint(None)
         //     .enable_broadcast(true)
         //     .build();
-        // let redislist_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
+        let backend_options = RedisListOptions::new("redis://127.0.0.1".to_string()).build();
 
         let fut = tokio_runtime.spawn(BurstMiddleware::create_proxies::<
             TokioChannelImpl,
-            RabbitMQMImpl,
+            RedisListImpl,
             _,
             _,
         >(burst_options, channel_options, backend_options));
@@ -73,13 +73,21 @@ fn main() {
         let actors = proxies
             .into_iter()
             .map(|(worker_id, middleware)| {
-                let actor = MiddlewareActorHandle::new(middleware, &tokio_runtime);
-                (worker_id, actor)
+                (
+                    worker_id,
+                    Middleware::new(middleware, tokio_runtime.handle().clone()),
+                )
             })
-            .collect::<HashMap<u32, MiddlewareActorHandle>>();
+            .collect::<HashMap<u32, Middleware<_>>>();
 
-        let group_threads = group(actors);
-        threads.extend(group_threads);
+        for (worker_id, actor) in actors {
+            let thread = thread::spawn(move || {
+                info!("thread start: id={}", worker_id);
+                worker(actor);
+                info!("thread end: id={}", worker_id);
+            });
+            threads.push(thread);
+        }
     }
 
     for thread in threads {
@@ -87,23 +95,9 @@ fn main() {
     }
 }
 
-fn group(proxies: HashMap<u32, MiddlewareActorHandle>) -> Vec<std::thread::JoinHandle<()>> {
-    let mut threads = Vec::with_capacity(proxies.len());
-    for (worker_id, proxy) in proxies {
-        let thread = thread::spawn(move || {
-            info!("thread start: id={}", worker_id);
-            worker(proxy);
-            info!("thread end: id={}", worker_id);
-        });
-        threads.push(thread);
-    }
-
-    return threads;
-}
-
-fn worker(burst_middleware: MiddlewareActorHandle) {
-    let res: Message;
-    if burst_middleware.info.worker_id == 0 {
+fn worker(burst_middleware: Middleware<Bytes>) {
+    let burst_middleware = burst_middleware.get_actor_handle();
+    let res = if burst_middleware.info.worker_id == 0 {
         let msg = "hello world";
         let data = Bytes::from(msg);
         log::info!(
@@ -111,15 +105,15 @@ fn worker(burst_middleware: MiddlewareActorHandle) {
             burst_middleware.info.worker_id,
             data
         );
-        res = burst_middleware.broadcast(Some(data), 0).unwrap();
+        burst_middleware.broadcast(Some(data), 0).unwrap()
     } else {
         log::info!(
             "worker {} (group {}) => waiting for broadcast",
             burst_middleware.info.worker_id,
             burst_middleware.info.group_id
         );
-        res = burst_middleware.broadcast(None, 0).unwrap();
-    }
+        burst_middleware.broadcast(None, 0).unwrap()
+    };
     log::info!(
         "worker {} (group {}) => received broadcast data: {:?}",
         burst_middleware.info.worker_id,

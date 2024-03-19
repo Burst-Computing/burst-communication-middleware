@@ -1,5 +1,6 @@
-use crate::Message;
 use bytes::{Bytes, BytesMut};
+
+use crate::{MessageMetadata, RemoteMessage};
 
 pub struct BytesMutChunkedMessageBody {
     chunked_buffs: Vec<BytesMut>,
@@ -27,7 +28,7 @@ impl BytesMutChunkedMessageBody {
     }
 
     pub fn insert(&mut self, chunk_id: u32, chunk: Bytes) {
-        log::debug!("Inserting chunk {} of {}", chunk_id, self.num_chunks);
+        // log::debug!("Inserting chunk {} of {}", chunk_id, self.num_chunks);
 
         self.bytes_written += chunk.len();
         let chunk_buff = &mut self.chunked_buffs[chunk_id as usize];
@@ -43,11 +44,11 @@ impl BytesMutChunkedMessageBody {
         }
 
         self.num_chunks_stored += 1;
-        log::debug!(
-            "Received {} of {} chunks",
-            self.num_chunks_stored,
-            self.num_chunks
-        );
+        // log::debug!(
+        //     "Received {} of {} chunks",
+        //     self.num_chunks_stored,
+        //     self.num_chunks
+        // );
     }
 
     pub fn is_complete(&self) -> bool {
@@ -69,7 +70,7 @@ impl BytesMutChunkedMessageBody {
     }
 }
 
-pub fn chunk_message(msg: &Message, max_chunk_size: usize) -> Vec<Message> {
+pub fn chunk_message(msg: &RemoteMessage, max_chunk_size: usize) -> Vec<RemoteMessage> {
     let mut chunks = Vec::new();
     let mut body = msg.data.clone();
     while !body.is_empty() {
@@ -81,12 +82,14 @@ pub fn chunk_message(msg: &Message, max_chunk_size: usize) -> Vec<Message> {
     chunks
         .into_iter()
         .enumerate()
-        .map(|(i, data)| Message {
-            sender_id: msg.sender_id,
-            chunk_id: i as u32,
-            num_chunks: num_chunks as u32,
-            counter: msg.counter,
-            collective: msg.collective,
+        .map(|(i, data)| RemoteMessage {
+            metadata: MessageMetadata {
+                sender_id: msg.metadata.sender_id,
+                chunk_id: i as u32,
+                num_chunks: num_chunks as u32,
+                counter: msg.metadata.counter,
+                collective: msg.metadata.collective,
+            },
             data,
         })
         .collect()

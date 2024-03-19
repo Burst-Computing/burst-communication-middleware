@@ -3,40 +3,17 @@ use burst_communication_middleware::{
     RabbitMQOptions, RedisListImpl, RedisListOptions, RedisStreamImpl, RedisStreamOptions, S3Impl,
     S3Options, TokioChannelImpl, TokioChannelOptions,
 };
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use log::{error, info};
 use std::{
     collections::{HashMap, HashSet},
-    env, thread,
+    env,
+    ops::Add,
+    thread, time,
 };
 
-const BURST_SIZE: u32 = 32;
+const BURST_SIZE: u32 = 256;
 const GROUPS: u32 = 4;
-const PAYLOAD_SIZE: usize = 4 * 1024 * 1024; // 4MB
-
-#[derive(Debug)]
-struct Msg(Vec<u32>);
-
-impl From<Bytes> for Msg {
-    fn from(bytes: Bytes) -> Self {
-        let mut vec = Vec::new();
-        for i in (0..bytes.len()).step_by(4) {
-            let value = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
-            vec.push(value);
-        }
-        Msg(vec)
-    }
-}
-
-impl From<Msg> for Bytes {
-    fn from(msg: Msg) -> Self {
-        let mut bytes = BytesMut::with_capacity(msg.0.len() * 4);
-        for value in msg.0 {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        bytes.freeze()
-    }
-}
 
 fn main() {
     env_logger::init();
@@ -105,7 +82,7 @@ fn main() {
                     Middleware::new(middleware, tokio_runtime.handle().clone()),
                 )
             })
-            .collect::<HashMap<u32, Middleware<Bytes>>>();
+            .collect::<HashMap<u32, Middleware<Myi32>>>();
 
         for (worker_id, actor) in actors {
             let thread = thread::spawn(move || {
@@ -120,30 +97,46 @@ fn main() {
     for thread in threads {
         thread.join().unwrap();
     }
+
+    // Sleep 5 seconds
+    std::thread::sleep(time::Duration::from_secs(5));
 }
 
-fn worker(burst_middleware: Middleware<Bytes>) {
-    let burst_middleware = burst_middleware.get_actor_handle();
+#[derive(Clone, Copy, Debug)]
+struct Myi32(i32);
 
-    let msg = format!("hello from worker {}", burst_middleware.info.worker_id);
-    let data = Bytes::from(msg);
-    if let Some(msgs) = burst_middleware.gather(data, 0).unwrap() {
-        for msg in msgs {
-            info!(
-                "worker {} received message: {:?}",
-                burst_middleware.info.worker_id, msg
-            );
-        }
+impl From<Bytes> for Myi32 {
+    fn from(bytes: Bytes) -> Self {
+        let val = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        Myi32(val)
     }
+}
 
-    let data = Bytes::from(vec![0x00; PAYLOAD_SIZE]);
-    if let Some(msgs) = burst_middleware.gather(data, 0).unwrap() {
-        for msg in msgs {
-            info!(
-                "worker {} received message: {:?}",
-                burst_middleware.info.worker_id,
-                msg.len()
-            );
-        }
+impl From<Myi32> for Bytes {
+    fn from(val: Myi32) -> Self {
+        let bytes = val.0.to_be_bytes();
+        Bytes::copy_from_slice(&bytes)
+    }
+}
+
+impl From<Myi32> for i32 {
+    fn from(val: Myi32) -> Self {
+        val.0
+    }
+}
+
+fn worker(burst_middleware: Middleware<Myi32>) {
+    let burst_middleware = burst_middleware.get_actor_handle();
+    let val: Myi32 = Myi32(1);
+    let result = burst_middleware
+        .reduce(val, |a, b| {
+            let a: i32 = a.into();
+            let b: i32 = b.into();
+            Myi32(a + b)
+        })
+        .unwrap();
+
+    if let Some(result) = result {
+        info!("----------> Reduced value is {:?} <----------", result);
     }
 }
