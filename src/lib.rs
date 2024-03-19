@@ -1,26 +1,16 @@
 mod actor;
-mod burst_message_relay;
+mod backends;
 mod chunk_store;
 mod message_buffer;
 mod middleware;
-mod rabbitmq;
-mod redis_list;
-mod redis_stream;
-mod s3;
-mod tokio_channel;
 mod types;
 mod utils;
 
 pub use actor::*;
-pub use burst_message_relay::*;
+pub use backends::*;
 use bytes::Bytes;
 pub use middleware::*;
-pub use rabbitmq::*;
-pub use redis_list::*;
-pub use redis_stream::*;
-pub use s3::*;
 use tokio::runtime::{Handle, Runtime};
-pub use tokio_channel::*;
 pub use types::*;
 
 use std::collections::{HashMap, HashSet};
@@ -115,8 +105,9 @@ where
         channel_options.broadcast_channel_size(size);
     }
 
-    let actors = tokio_runtime.block_on(async move {
+    let actors: Result<HashMap<u32, BurstMiddleware<T>>> = tokio_runtime.block_on(async move {
         match &conf.backend {
+            #[cfg(feature = "s3")]
             Backend::S3 {
                 bucket,
                 region,
@@ -151,6 +142,11 @@ where
                 )
                 .await
             }
+            #[cfg(not(feature = "s3"))]
+            Backend::S3 { .. } => {
+                panic!("S3 backend is not enabled")
+            }
+            #[cfg(feature = "redis_stream")]
             Backend::RedisStream => {
                 let mut options = RedisStreamOptions::default();
                 if let Some(server) = &conf.server {
@@ -164,6 +160,11 @@ where
                 )
                 .await
             }
+            #[cfg(not(feature = "redis_stream"))]
+            Backend::RedisStream => {
+                panic!("Redis Stream backend is not enabled")
+            }
+            #[cfg(feature = "redis_list")]
             Backend::RedisList => {
                 let mut options = RedisListOptions::default();
                 if let Some(server) = &conf.server {
@@ -176,6 +177,11 @@ where
                 )
                 .await
             }
+            #[cfg(not(feature = "redis_list"))]
+            Backend::RedisList => {
+                panic!("Redis List backend is not enabled")
+            }
+            #[cfg(feature = "rabbitmq")]
             Backend::Rabbitmq => {
                 let mut options = RabbitMQOptions::default()
                     .durable_queues(true)
@@ -191,6 +197,11 @@ where
                 )
                 .await
             }
+            #[cfg(not(feature = "rabbitmq"))]
+            Backend::Rabbitmq => {
+                panic!("RabbitMQ backend is not enabled")
+            }
+            #[cfg(feature = "burst_message_relay")]
             Backend::MessageRelay => {
                 let mut options = BurstMessageRelayOptions::default();
                 if let Some(server) = &conf.server {
@@ -202,6 +213,10 @@ where
                     options,
                 )
                 .await
+            }
+            #[cfg(not(feature = "burst_message_relay"))]
+            Backend::MessageRelay => {
+                panic!("Burst Message Relay backend is not enabled")
             }
         }
     });
