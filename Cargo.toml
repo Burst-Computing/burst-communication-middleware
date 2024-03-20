@@ -9,20 +9,62 @@ edition = "2021"
 async-trait = "0.1.74"
 bytes = "1.5.0"
 futures = "0.3.29"
-lapin = "2.3.1"
 log = "0.4.20"
 tokio = { version = "1.33.0", features = ["full"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 env_logger = "0.9.3"
 uuid = { version = "1.5.0", features = ["v4"] }
-redis = { version = "0.24", features = ["tokio-comp"] }
-deadpool-redis = "0.14.0"
 dashmap = "5.5.3"
-aws-sdk-s3 = { verison = "1.14.0", features = ["behavior-version-latest"] }
-aws-config = { version = "1.1.4", features = ["behavior-version-latest"] }
+lapin = { version = "2.3.1", optional = true }
+deadpool-lapin = { version = "0.11.0", optional = true }
+redis = { version = "0.24", features = ["tokio-comp"], optional = true }
+deadpool-redis = { version = "0.14.0", optional = true }
+aws-sdk-s3 = { verison = "1.14.0", features = [
+    "behavior-version-latest",
+], optional = true }
+aws-config = { version = "1.1.4", features = [
+    "behavior-version-latest",
+], optional = true }
 aws-credential-types = { version = "1.0.0", features = [
     "hardcoded-credentials",
-] }
-burst-message-relay = { path = "burst-message-relay" }
-deadpool-lapin = "0.11.0"
+], optional = true }
+burst-message-relay = { path = "burst-message-relay", optional = true }
+
+[features]
+default = ["tokio_channel"]
+burst_message_relay = ["dep:burst-message-relay"]
+rabbitmq = ["dep:lapin", "dep:deadpool-lapin"]
+redis_list = ["dep:redis", "dep:deadpool-redis"]
+redis_stream = ["dep:redis", "dep:deadpool-redis"]
+redis = ["redis_list", "redis_stream"]
+s3 = ["dep:aws-sdk-s3", "dep:aws-config", "dep:aws-credential-types"]
+tokio_channel = []
+
+[[example]]
+name = "broadcast"
+required-features = ["redis", "rabbitmq", "s3"]
+
+[[example]]
+name = "gather_remote"
+required-features = ["redis", "rabbitmq", "s3"]
+
+[[example]]
+name = "hello_world_local"
+required-features = ["rabbitmq"]
+
+[[example]]
+name = "hello_world_remote"
+required-features = ["redis_list", "rabbitmq"]
+
+[[example]]
+name = "large_broadcast"
+required-features = ["redis", "rabbitmq", "s3"]
+
+[[example]]
+name = "large_send"
+required-features = ["redis", "rabbitmq", "s3"]
+
+[[example]]
+name = "reduce"
+required-features = ["redis", "rabbitmq", "s3"]
