@@ -44,6 +44,10 @@ pub enum Backend {
         session_token: Option<String>,
         // Semphore permits
         semaphore_permits: Option<usize>,
+        // Retry
+        retry: Option<u32>,
+        // Wait time
+        wait_time: Option<f64>,
     },
     /// Use Redis Streams as backend
     RedisStream,
@@ -115,6 +119,8 @@ where
                 secret_access_key,
                 session_token,
                 semaphore_permits,
+                retry,
+                wait_time,
             } => {
                 let mut options = S3Options::default();
                 if let Some(bucket) = bucket {
@@ -133,6 +139,12 @@ where
                 options.endpoint(conf.server.clone());
                 if let Some(permits) = semaphore_permits {
                     options.semaphore_permits(*permits);
+                }
+                if let Some(retry) = retry {
+                    options.retry(*retry);
+                }
+                if let Some(wait_time) = wait_time {
+                    options.wait_time(*wait_time);
                 }
 
                 BurstMiddleware::create_proxies::<TokioChannelImpl, S3Impl, _, _>(
