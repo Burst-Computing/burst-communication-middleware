@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use aws_config::Region;
 use aws_credential_types::Credentials;
 
-use aws_sdk_s3::{primitives::ByteStream, Client};
+use aws_sdk_s3::{config::StalledStreamProtectionConfig, primitives::ByteStream, Client};
 
 use crate::{
     impl_chainable_setter, BurstOptions, CollectiveType, MessageMetadata, RemoteBroadcastProxy,
@@ -105,17 +105,20 @@ impl RemoteSendReceiveFactory<S3Options> for S3Impl {
                     .endpoint_url(endpoint)
                     .credentials_provider(credentials_provider)
                     .region(Region::new(s3_options.region.clone()))
+                    .stalled_stream_protection(StalledStreamProtectionConfig::disabled())
                     .force_path_style(true) // apply bucketname as path param instead of pre-domain
                     .build()
             }
             None => aws_sdk_s3::config::Builder::new()
                 .credentials_provider(credentials_provider)
                 .region(Region::new(s3_options.region.clone()))
+                .stalled_stream_protection(StalledStreamProtectionConfig::disabled())
                 .build(),
         };
         let bcast_config = config.clone();
         let s3_client = Client::from_conf(config.clone());
 
+        log::debug!("Checking if bucket exists...");
         let bucket = s3_client
             .head_bucket()
             .bucket(s3_options.bucket.clone())
@@ -274,6 +277,7 @@ impl RemoteSendProxy for S3SendProxy {
         let byte_stream = ByteStream::from(msg.data.clone());
         let key = format_remote_message_key(&self.burst_options.burst_id, dest, &msg);
         let permit = self.client_semaphore.acquire().await.unwrap();
+        log::debug!("S3 Put object with key {}...", key);
         self.s3_client
             .put_object()
             .bucket(self.s3_options.bucket.clone())
@@ -286,7 +290,7 @@ impl RemoteSendProxy for S3SendProxy {
             .metadata("num_chunks", msg.metadata.num_chunks.to_string())
             .send()
             .await?;
-        log::debug!("S3 Put object {}", key);
+        log::debug!("OK -> S3 Put object {}", key);
         drop(permit);
         Ok(())
     }
