@@ -55,8 +55,6 @@ pub enum Backend {
     RedisList,
     /// Use RabbitMQ as backend
     Rabbitmq,
-    /// Use burst message relay as backend
-    MessageRelay,
 }
 
 pub struct Middleware<T> {
@@ -212,23 +210,6 @@ where
             #[cfg(not(feature = "rabbitmq"))]
             Backend::Rabbitmq => {
                 panic!("RabbitMQ backend is not enabled")
-            }
-            #[cfg(feature = "burst_message_relay")]
-            Backend::MessageRelay => {
-                let mut options = BurstMessageRelayOptions::default();
-                if let Some(server) = &conf.server {
-                    options.server_uri(server.to_string());
-                }
-                BurstMiddleware::create_proxies::<TokioChannelImpl, BurstMessageRelayImpl, _, _>(
-                    burst_options,
-                    channel_options,
-                    options,
-                )
-                .await
-            }
-            #[cfg(not(feature = "burst_message_relay"))]
-            Backend::MessageRelay => {
-                panic!("Burst Message Relay backend is not enabled")
             }
         }
     });

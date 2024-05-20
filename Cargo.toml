@@ -29,11 +29,9 @@ aws-config = { version = "1.4.0", features = [
 aws-credential-types = { version = "1.2.0", features = [
     "hardcoded-credentials",
 ], optional = true }
-burst-message-relay = { path = "burst-message-relay", optional = true }
 
 [features]
 default = ["tokio_channel"]
-burst_message_relay = ["dep:burst-message-relay"]
 rabbitmq = ["dep:lapin", "dep:deadpool-lapin"]
 redis_list = ["dep:redis", "dep:deadpool-redis"]
 redis_stream = ["dep:redis", "dep:deadpool-redis"]
